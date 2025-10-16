@@ -4,6 +4,8 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/auth_service.dart';
+import '../services/audio_feedback.dart';
+
 import 'preload_page.dart'; // or your first page (HomePage), keep what you use today
 
 class Slide {
@@ -35,7 +37,10 @@ class _WelcomePageState extends State<WelcomePage> {
   @override
   void initState() {
     super.initState();
-    // Auto-slide every 5s
+    
+    // audio: page open
+    try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
+// Auto-slide every 5s
     _timer = Timer.periodic(const Duration(seconds: 5), (timer) {
       if (!_pageController.hasClients) return;
       final next = ((_pageController.page?.round() ?? currentPage) + 1) % slides.length;
@@ -51,7 +56,10 @@ class _WelcomePageState extends State<WelcomePage> {
   void dispose() {
     _timer?.cancel();
     _pageController.dispose();
-    super.dispose();
+        // audio: page close
+    try { AudioFeedback.instance.playEvent(SoundEvent.pageClose); } catch (_) {}
+
+super.dispose();
   }
 
   Future<void> _markOnboardedAndEnter() async {

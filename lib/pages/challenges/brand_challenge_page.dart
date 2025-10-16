@@ -5,7 +5,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
-import '../../services/audio_feedback.dart'; // added by audio patch
+import '../../services/audio_feedback.dart';
 
 import '../../services/image_service_cache.dart'; // ← Utilisation du cache local
 
@@ -46,10 +46,7 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
   @override
   void initState() {
     super.initState();
-    
-    // audio: page open
-    try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
-_loadCsv();
+    _loadCsv();
 
     // Overall quiz timer (counts seconds)
     _questionTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -61,10 +58,7 @@ _loadCsv();
   void dispose() {
     _questionTimer?.cancel();
     _imageCycleTimer?.cancel();
-        // audio: page close
-    try { AudioFeedback.instance.playEvent(SoundEvent.pageClose); } catch (_) {}
-
-super.dispose();
+    super.dispose();
   }
 
   Future<void> _loadCsv() async {
@@ -266,7 +260,8 @@ super.dispose();
                                           : Colors.grey[800]!))
                                   : Colors.grey[800],
                               child: InkWell(
-                                onTap: () => _onBrandTap(b),
+                                onTap: () { try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {};
+                              _onBrandTap(b); },
                                 child: Center(
                                   child: Text(
                                     b,
@@ -315,7 +310,8 @@ super.dispose();
                             child: Material(
                               color: Colors.grey[900],
                               child: InkWell(
-                                onTap: () => _onModelTap(m['model']!),
+                                onTap: () { try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {};
+                              _onModelTap(m['model']!); },
                                 child: AnimatedSwitcher(
                                   duration: const Duration(milliseconds: 500),
                                   transitionBuilder:
@@ -361,7 +357,9 @@ super.dispose();
   }
 
   void _onBrandTap(String brand) {
-    if (_answered) return;
+    
+    try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
+if (_answered) return;
     setState(() {
       _selectedBrand = brand;
       _answered = true;
@@ -371,7 +369,9 @@ super.dispose();
   }
 
   void _onModelTap(String model) {
-    if (_answered) return;
+    
+    try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
+if (_answered) return;
     setState(() {
       _selectedModel = model;
       _answered = true;

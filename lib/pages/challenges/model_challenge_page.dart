@@ -5,7 +5,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
-import '../../services/audio_feedback.dart'; // added by audio patch
+import '../../services/audio_feedback.dart';
 
 import '../../services/image_service_cache.dart'; // ← Utilisation du cache local
 
@@ -42,10 +42,7 @@ class _ModelChallengePageState extends State<ModelChallengePage> {
   @override
   void initState() {
     super.initState();
-    
-    // audio: page open
-    try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
-_loadCsv();
+    _loadCsv();
 
     // overall quiz timer
     _quizTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -64,10 +61,7 @@ _loadCsv();
   void dispose() {
     _quizTimer?.cancel();
     _frameTimer?.cancel();
-        // audio: page close
-    try { AudioFeedback.instance.playEvent(SoundEvent.pageClose); } catch (_) {}
-
-super.dispose();
+    super.dispose();
   }
 
   Future<void> _loadCsv() async {
@@ -190,13 +184,7 @@ if (_answered) return;
         _correctAnswers++;
       }
     });
-    
-    // audio: answer feedback
-    try {
-      if (_selectedAnswer == _correctAnswer) { AudioFeedback.instance.playEvent(SoundEvent.answerCorrect); } else { AudioFeedback.instance.playEvent(SoundEvent.answerWrong); }
-      try { if (true) { /* streak logic handled centrally if needed */ } } catch (_) {}
-    } catch (_) {}
-Future.delayed(const Duration(seconds: 1), _nextQuestion);
+    Future.delayed(const Duration(seconds: 1), _nextQuestion);
   }
 
   @override
@@ -263,7 +251,8 @@ Future.delayed(const Duration(seconds: 1), _nextQuestion);
                                           : Colors.grey[800]!))
                                   : Colors.grey[800],
                               child: InkWell(
-                                onTap: () => _onTap(opt['model']!),
+                                onTap: () { try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {};
+                              _onTap(opt['model']!); },
                                 child: Center(
                                   child: Text(
                                     opt['model']!,
@@ -304,8 +293,8 @@ Future.delayed(const Duration(seconds: 1), _nextQuestion);
                         final isSelected =
                             '${opt['brand']} ${opt['model']}' == _selectedAnswer;
                         return GestureDetector(
-                          onTap: () =>
-                              _onTap('${opt['brand']} ${opt['model']}'),
+                          onTap: () { try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {};
+                              _onTap('${opt['brand']} ${opt['model']}'); },
                           child: ClipRRect(
                             borderRadius: BorderRadius.circular(12),
                             child: AnimatedSwitcher(

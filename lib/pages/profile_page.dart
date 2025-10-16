@@ -10,6 +10,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 
 import '../services/image_service_cache.dart';
 import 'preload_page.dart';
+import '../services/audio_feedback.dart';
+
 
 class ProfilePage extends StatefulWidget {
   final VoidCallback? onReplayTutorial;
@@ -109,7 +111,10 @@ class _ProfilePageState extends State<ProfilePage> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    
+    // audio: page open
+    try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
+WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkNewAchievement();
     });
     _loadProfileData();
@@ -428,7 +433,10 @@ class _ProfilePageState extends State<ProfilePage> {
     final id = _getAchievementIdFromName(fullText);
     final isUnlocked = unlockedAchievementIds.contains(id);
     return GestureDetector(
-      onTap: () => _showAchievementPopup(context, fullText),
+      onTap: () {
+        try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
+        _showAchievementPopup(context, fullText);
+      },
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -456,7 +464,15 @@ class _ProfilePageState extends State<ProfilePage> {
             ),
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Close"))
+            TextButton(
+              onPressed: () {
+                try {
+                  AudioFeedback.instance.playEvent(SoundEvent.tap);
+                } catch (_) {}
+                Navigator.of(ctx).pop();
+              },
+              child: const Text("Close"),
+            ),
           ],
         );
       },
@@ -635,6 +651,7 @@ class _ProfilePageState extends State<ProfilePage> {
             if (_googleSignedIn)
               TextButton(
                 onPressed: () {
+                  try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
                   // close dialog then open disconnect confirmation
                   Navigator.of(ctx).pop();
                   showDialog(
@@ -643,11 +660,17 @@ class _ProfilePageState extends State<ProfilePage> {
                       title: const Text('Disconnect Google?'),
                       content: const Text('This will sign out and revoke Google access on this device.'),
                       actions: [
-                        TextButton(onPressed: () => Navigator.of(confirmCtx).pop(), child: const Text('Cancel')),
+                        TextButton(
+                          onPressed: () {
+                            try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
+                            Navigator.of(confirmCtx).pop();
+                          },
+                          child: const Text('Cancel'),
+                        ),
                         ElevatedButton(
-                          onPressed: () async {
-                            Navigator.of(confirmCtx).pop(); // close confirm
-                            await _disconnectGoogleAccount(context);
+                          onPressed: () {
+                            try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
+                            _disconnectGoogleAccount(ctx);
                           },
                           child: const Text('Disconnect'),
                         ),
@@ -657,7 +680,13 @@ class _ProfilePageState extends State<ProfilePage> {
                 },
                 child: const Text('Disconnect'),
               ),
-            TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Close')),
+            TextButton(
+              onPressed: () {
+                try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
+                Navigator.of(ctx).pop();
+              },
+              child: const Text('Close'),
+            ),
           ],
         );
       },
@@ -711,7 +740,15 @@ class _ProfilePageState extends State<ProfilePage> {
       builder: (ctx) => AlertDialog(
         title: Text(title),
         content: Text(description),
-        actions: [TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text("OK"))],
+        actions: [
+          TextButton(
+            onPressed: () {
+              try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
+              Navigator.of(ctx).pop();
+            },
+            child: const Text("OK"),
+          ),
+        ],
       ),
     );
   }
@@ -748,7 +785,17 @@ class _ProfilePageState extends State<ProfilePage> {
             children: unlocked.map((name) => _buildMiniAchievement(name)).toList(),
           ),
         ),
-        actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text("Close"))],
+        actions: [
+          TextButton(
+            onPressed: () {
+              try {
+                AudioFeedback.instance.playEvent(SoundEvent.tap);
+              } catch (_) {}
+              Navigator.of(context).pop();
+            },
+            child: const Text("Close"),
+          ),
+        ],
       ),
     );
   }
@@ -770,7 +817,17 @@ class _ProfilePageState extends State<ProfilePage> {
             children: locked.map((name) => _buildMiniAchievement(name)).toList(),
           ),
         ),
-        actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text("Close"))],
+        actions: [
+          TextButton(
+            onPressed: () {
+              try {
+                AudioFeedback.instance.playEvent(SoundEvent.tap);
+              } catch (_) {}
+              Navigator.of(context).pop();
+            },
+            child: const Text("Close"),
+          ),
+        ],
       ),
     );
   }
@@ -905,7 +962,12 @@ class _ProfilePageState extends State<ProfilePage> {
                       width: double.infinity,
                       child: ElevatedButton(
                         style: ElevatedButton.styleFrom(minimumSize: const Size.fromHeight(40)),
-                        onPressed: () => _disconnectGoogleAccount(ctx),
+                        onPressed: () {
+                          try {
+                            AudioFeedback.instance.playEvent(SoundEvent.tap);
+                          } catch (_) {}
+                          _disconnectGoogleAccount(ctx);
+                        },
                         child: const Text('Disconnect Google'),
                       ),
                     ),
@@ -1017,11 +1079,19 @@ class _ProfilePageState extends State<ProfilePage> {
                     favoriteBrand = fb;
                     favoriteModel = fm;
                   });
-                  Navigator.pop(ctx);
+                  Navigator.of(ctx).pop();
                 },
                 child: const Text('Save'),
               ),
-              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+              TextButton(
+                onPressed: () {
+                  try {
+                    AudioFeedback.instance.playEvent(SoundEvent.tap);
+                  } catch (_) {}
+                  Navigator.of(ctx).pop();
+                },
+                child: const Text('Cancel'),
+              ),
             ],
           );
         },
@@ -1130,7 +1200,9 @@ class _ProfilePageState extends State<ProfilePage> {
                         final isLast = i == 2;
                         return GestureDetector(
                           onTap: () {
-                            if (isLast) {
+                            
+                              try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
+if (isLast) {
                               _showUnlockedAchievementsPopup(context);
                             } else {
                               _showAchievementPopup(context, name);
@@ -1175,7 +1247,9 @@ class _ProfilePageState extends State<ProfilePage> {
                       final isLast = i == 2;
                       return GestureDetector(
                         onTap: () {
-                          if (isLast) {
+                          
+                              try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
+if (isLast) {
                             _showLockedAchievementsPopup(context);
                           } else {
                             _showAchievementPopup(context, name);

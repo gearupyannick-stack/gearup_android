@@ -5,7 +5,7 @@ import 'dart:convert';               // for LineSplitter
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
-import '../../services/audio_feedback.dart'; // added by audio patch
+import '../../services/audio_feedback.dart';
 
 import '../../services/image_service_cache.dart'; // ← Utilisation du cache local
 
@@ -24,10 +24,7 @@ class _ModelsByBrandChallengePageState
   @override
   void initState() {
     super.initState();
-    
-    // audio: page open
-    try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
-_brands = [];
+    _brands = [];
     _loadCsv();
   }
 
@@ -236,10 +233,7 @@ class _BrandModelQuizPageState extends State<BrandModelQuizPage> {
   void dispose() {
     _quizTimer.cancel();
     _frameTimer.cancel();
-        // audio: page close
-    try { AudioFeedback.instance.playEvent(SoundEvent.pageClose); } catch (_) {}
-
-super.dispose();
+    super.dispose();
   }
 
   void _nextQuestion() {
@@ -313,7 +307,9 @@ super.dispose();
   }
 
   void _onOptionTap(String selection) {
-    if (_answered) return;
+    
+    try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
+if (_answered) return;
     setState(() {
       _answered = true;
       _selectedModel = selection;
@@ -385,7 +381,8 @@ super.dispose();
                                     : Colors.grey[800]!))
                             : Colors.grey[800],
                         child: InkWell(
-                          onTap: () => _onOptionTap(m),
+                          onTap: () { try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {};
+                              _onOptionTap(m); },
                           child: Center(
                             child: Text(
                               m,
@@ -425,7 +422,8 @@ super.dispose();
                   final isSelected = model == _selectedModel;
 
                   return GestureDetector(
-                    onTap: () => _onOptionTap(model),
+                    onTap: () { try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {};
+                              _onOptionTap(model); },
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(12),
                       child: Material(

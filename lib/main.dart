@@ -31,6 +31,7 @@ void main() async {
     options: DefaultFirebaseOptions.currentPlatform,
   );
 
+  await SoundManager.instance.init();
   // --------------------------
   // App Check: DEBUG provider (local dev)
   // --------------------------
@@ -59,11 +60,6 @@ void main() async {
 
   final livesStorage = LivesStorage();
   final int savedLives = await livesStorage.readLives();
-
-  // Init sound manager
-  await SoundManager.instance.init();
-  // Preload SFX (fast)
-  await SoundManager.instance.preloadSfx();
 
   runApp(CarLearningApp(
     shouldPreload: shouldPreload,
@@ -235,6 +231,9 @@ class MainPage extends StatefulWidget {
 }
 
 class _MainPageState extends State<MainPage> {
+  // Keep a strong reference to the tutorial so buttons can call next()/finish()
+  TutorialCoachMark? _tutorialCoachMark;
+
   // ── CONFIG ─────────────────────────────────────────
   static const int _maxLives = 5;
   static const int _refillInterval = 600; // seconds per life
@@ -506,7 +505,8 @@ class _MainPageState extends State<MainPage> {
     final skipYOffset = (50 / size.height) * 15.0; // Alignment y goes from -1 to 1
 
     // local reference to the coach mark so our Continue buttons can call next()/finish()
-    late TutorialCoachMark tutorialCoachMark;
+    // use the field instead of a local variable
+    // late TutorialCoachMark tutorialCoachMark;
 
     // small reusable style for the textual content
     const TextStyle tutorialTextStyle = TextStyle(
@@ -538,7 +538,7 @@ class _MainPageState extends State<MainPage> {
                 ),
                 const SizedBox(height: 16),
                 ElevatedButton(
-                  onPressed: () => tutorialCoachMark.next(),
+                  onPressed: () => _tutorialCoachMark?.next(),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.white,
                     foregroundColor: Colors.black,
@@ -579,7 +579,7 @@ class _MainPageState extends State<MainPage> {
                 ),
                 const SizedBox(height: 16),
                 ElevatedButton(
-                  onPressed: () => tutorialCoachMark.next(),
+                  onPressed: () => _tutorialCoachMark?.next(),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.white,
                     foregroundColor: Colors.black,
@@ -620,7 +620,7 @@ class _MainPageState extends State<MainPage> {
                 ),
                 const SizedBox(height: 16),
                 ElevatedButton(
-                  onPressed: () => tutorialCoachMark.next(),
+                  onPressed: () => _tutorialCoachMark?.next(),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.white,
                     foregroundColor: Colors.black,
@@ -668,7 +668,7 @@ class _MainPageState extends State<MainPage> {
                 ),
                 const SizedBox(height: 16),
                 ElevatedButton(
-                  onPressed: () => tutorialCoachMark.next(),
+                  onPressed: () => _tutorialCoachMark?.next(),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.white,
                     foregroundColor: Colors.black,
@@ -709,7 +709,7 @@ class _MainPageState extends State<MainPage> {
                 ),
                 const SizedBox(height: 16),
                 ElevatedButton(
-                  onPressed: () => tutorialCoachMark.next(),
+                  onPressed: () => _tutorialCoachMark?.next(),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.white,
                     foregroundColor: Colors.black,
@@ -750,7 +750,7 @@ class _MainPageState extends State<MainPage> {
                 ),
                 const SizedBox(height: 16),
                 ElevatedButton(
-                  onPressed: () => tutorialCoachMark.next(),
+                  onPressed: () => _tutorialCoachMark?.next(),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.white,
                     foregroundColor: Colors.black,
@@ -797,7 +797,7 @@ class _MainPageState extends State<MainPage> {
                 ),
                 const SizedBox(height: 16),
                 ElevatedButton(
-                  onPressed: () => tutorialCoachMark.next(),
+                  onPressed: () => _tutorialCoachMark?.next(),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.white,
                     foregroundColor: Colors.black,
@@ -838,7 +838,7 @@ class _MainPageState extends State<MainPage> {
                 ),
                 const SizedBox(height: 16),
                 ElevatedButton(
-                  onPressed: () => tutorialCoachMark.next(),
+                  onPressed: () => _tutorialCoachMark?.next(),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.white,
                     foregroundColor: Colors.black,
@@ -879,7 +879,7 @@ class _MainPageState extends State<MainPage> {
                 ),
                 const SizedBox(height: 16),
                 ElevatedButton(
-                  onPressed: () => tutorialCoachMark.next(),
+                  onPressed: () => _tutorialCoachMark?.next(),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.white,
                     foregroundColor: Colors.black,
@@ -920,7 +920,7 @@ class _MainPageState extends State<MainPage> {
                 ),
                 const SizedBox(height: 16),
                 ElevatedButton(
-                  onPressed: () => tutorialCoachMark.finish(),
+                  onPressed: () => _tutorialCoachMark?.finish(),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.white,
                     foregroundColor: Colors.black,
@@ -941,7 +941,7 @@ class _MainPageState extends State<MainPage> {
     ];
 
     // build and show
-    tutorialCoachMark = TutorialCoachMark(
+    _tutorialCoachMark = TutorialCoachMark(
       targets: targets,
       colorShadow: Colors.black87,
       textSkip: "SKIP",
@@ -958,7 +958,7 @@ class _MainPageState extends State<MainPage> {
       },
     );
 
-    tutorialCoachMark.show(
+    _tutorialCoachMark?.show(
       context: context,
       rootOverlay: true,
     );
