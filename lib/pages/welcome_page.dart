@@ -97,8 +97,7 @@ super.dispose();
         // Only Android for now (as requested)
         throw 'Google sign-in is only enabled on Android for now.';
       }
-      final auth = AuthService();
-      final user = await auth.signInWithGoogle();
+      final user = await AuthService.instance.signInWithGoogle();
       if (user == null) {
         throw 'Sign-in cancelled.';
       }

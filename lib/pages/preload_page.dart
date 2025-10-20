@@ -412,6 +412,7 @@ class _PreloadPageState extends State<PreloadPage> {
       }
     }
 
+    // ignore: deprecated_member_use
     return WillPopScope(
       onWillPop: () async => !_running, // allow leaving when not downloading
       child: Scaffold(

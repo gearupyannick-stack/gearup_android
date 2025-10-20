@@ -5,13 +5,11 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:google_sign_in/google_sign_in.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 
 import '../services/image_service_cache.dart';
 import 'preload_page.dart';
 import '../services/audio_feedback.dart';
-
+import '../services/auth_service.dart'; // <-- NEW: use singleton AuthService
 
 class ProfilePage extends StatefulWidget {
   final VoidCallback? onReplayTutorial;
@@ -111,10 +109,17 @@ class _ProfilePageState extends State<ProfilePage> {
   @override
   void initState() {
     super.initState();
-    
+
+    // Initialize AuthService (GoogleSignIn v7+ wrapper)
+    AuthService.instance.init().catchError((e) {
+      debugPrint('AuthService.init error: $e');
+    });
+
     // audio: page open
-    try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
-WidgetsBinding.instance.addPostFrameCallback((_) {
+    try {
+      AudioFeedback.instance.playEvent(SoundEvent.pageOpen);
+    } catch (_) {}
+    WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkNewAchievement();
     });
     _loadProfileData();
@@ -557,57 +562,45 @@ WidgetsBinding.instance.addPostFrameCallback((_) {
     }
   }
 
-  // --- ADD: start Google sign-in flow and persist prefs
+  // --- NEW: start Google sign-in flow via AuthService and persist prefs
   Future<void> _startGoogleSignInFlow({BuildContext? dialogContext}) async {
-    final google = GoogleSignIn(scopes: ['email', 'profile']);
     try {
-      final account = await google.signIn();
-      if (account == null) {
+      final credential = await AuthService.instance.signInWithGoogle();
+      if (credential == null) {
         // user cancelled
-        if (dialogContext != null) Navigator.of(dialogContext).pop(); // close loader if any
+        if (dialogContext != null) Navigator.of(dialogContext).pop();
         return;
       }
 
-      // get tokens and sign in with Firebase if possible
-      final auth = await account.authentication;
-      if (auth.idToken != null || auth.accessToken != null) {
-        final credential = GoogleAuthProvider.credential(
-          idToken: auth.idToken,
-          accessToken: auth.accessToken,
-        );
-        try {
-          await FirebaseAuth.instance.signInWithCredential(credential);
-        } catch (_) {
-          // ignore firebase failure but continue (we still have Google account)
-        }
-      }
-
-      // Persist minimal info
+      final user = credential.user;
       final prefs = await SharedPreferences.getInstance();
+
+      final displayName = user?.displayName ?? '';
+      final email = user?.email ?? '';
+      final photoUrl = user?.photoURL ?? '';
+
       await prefs.setBool('google_signed_in', true);
-      await prefs.setString('google_displayName', account.displayName ?? '');
-      await prefs.setString('google_email', account.email);
-      await prefs.setString('google_photoUrl', account.photoUrl ?? '');
+      await prefs.setString('google_displayName', displayName);
+      await prefs.setString('google_email', email);
+      await prefs.setString('google_photoUrl', photoUrl);
       await prefs.setBool('use_google_name', true);
       await prefs.setBool('is_guest', false);
 
       if (!mounted) return;
       setState(() {
         _googleSignedIn = true;
-        _googleDisplayName = account.displayName;
-        _googleEmail = account.email;
-        _googlePhotoUrl = account.photoUrl;
+        _googleDisplayName = displayName.isNotEmpty ? displayName : null;
+        _googleEmail = email.isNotEmpty ? email : null;
+        _googlePhotoUrl = photoUrl.isNotEmpty ? photoUrl : null;
         _useGoogleName = true;
         _isGuest = false;
-        // if user chose to default username to google name, apply it
         if (_useGoogleName && (_googleDisplayName?.isNotEmpty ?? false)) {
           username = _googleDisplayName!;
         }
       });
 
-      // close dialog if started from one
       if (dialogContext != null) {
-        Navigator.of(dialogContext).pop(); // close progress if any
+        Navigator.of(dialogContext).pop(); // close progress dialog
         Navigator.of(dialogContext).pop(); // close edit dialog
       }
     } catch (err) {
@@ -620,7 +613,7 @@ WidgetsBinding.instance.addPostFrameCallback((_) {
     }
   }
 
-  // --- ADD: show account information dialog (with disconnect)
+  // --- NEW: show account information dialog (with disconnect)
   void _showAccountDialog() {
     showDialog(
       context: context,
@@ -670,7 +663,7 @@ WidgetsBinding.instance.addPostFrameCallback((_) {
                         ElevatedButton(
                           onPressed: () {
                             try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
-                            _disconnectGoogleAccount(ctx);
+                            _disconnectGoogleAccount(confirmCtx);
                           },
                           child: const Text('Disconnect'),
                         ),
@@ -832,7 +825,7 @@ WidgetsBinding.instance.addPostFrameCallback((_) {
     );
   }
 
-  // Ajoute ceci dans la classe _ProfilePageState
+  // --- NEW: disconnect using AuthService (revoke tokens + sign out)
   Future<void> _disconnectGoogleAccount(BuildContext dialogContext) async {
     // affiche progress
     showDialog(
@@ -841,30 +834,14 @@ WidgetsBinding.instance.addPostFrameCallback((_) {
       builder: (_) => const Center(child: CircularProgressIndicator()),
     );
 
-    final google = GoogleSignIn();
     try {
-      // 1) Sign out from Firebase first (safe even if not signed)
-      await FirebaseAuth.instance.signOut();
+      // Use AuthService to disconnect (it signs out Firebase + Google properly)
+      await AuthService.instance.disconnectGoogle();
     } catch (_) {
       // ignore
     }
 
-    try {
-      // 2) Try to fully disconnect the Google account (revokes tokens)
-      if (await google.isSignedIn()) {
-        await google.disconnect();
-      } else {
-        // fallback to signOut if not signed or disconnect unsupported
-        await google.signOut();
-      }
-    } catch (_) {
-      // Last resort: try signOut even if disconnect failed
-      try {
-        await google.signOut();
-      } catch (_) {}
-    }
-
-    // 3) Clear persisted flags/tokens in SharedPreferences
+    // Clear persisted flags/tokens in SharedPreferences
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('google_signed_in', false);
     await prefs.remove('google_displayName');
@@ -876,7 +853,6 @@ WidgetsBinding.instance.addPostFrameCallback((_) {
 
     // 4) Update local state and close dialogs
     if (!mounted) {
-      // close progress dialog before returning (defensive)
       Navigator.of(dialogContext).pop();
       return;
     }
@@ -1014,14 +990,9 @@ WidgetsBinding.instance.addPostFrameCallback((_) {
                           );
 
                           try {
-                            // Try to sign out from SDKs as well (safe if not configured)
+                            // Use AuthService signOut (safe)
                             try {
-                              await FirebaseAuth.instance.signOut();
-                            } catch (_) {}
-                            try {
-                              final google = GoogleSignIn();
-                              await google.signOut();
-                              // await google.disconnect();
+                              await AuthService.instance.signOut();
                             } catch (_) {}
 
                             final prefs = await SharedPreferences.getInstance();
@@ -1200,9 +1171,8 @@ WidgetsBinding.instance.addPostFrameCallback((_) {
                         final isLast = i == 2;
                         return GestureDetector(
                           onTap: () {
-                            
-                              try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
-if (isLast) {
+                            try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
+                            if (isLast) {
                               _showUnlockedAchievementsPopup(context);
                             } else {
                               _showAchievementPopup(context, name);
@@ -1247,9 +1217,8 @@ if (isLast) {
                       final isLast = i == 2;
                       return GestureDetector(
                         onTap: () {
-                          
-                              try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
-if (isLast) {
+                          try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
+                          if (isLast) {
                             _showLockedAchievementsPopup(context);
                           } else {
                             _showAchievementPopup(context, name);

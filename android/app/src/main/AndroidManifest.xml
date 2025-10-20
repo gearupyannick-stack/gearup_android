@@ -5,6 +5,11 @@
 
     <!-- Ads ID permission (recommended for AdMob) -->
     <uses-permission android:name="com.google.android.gms.permission.AD_ID"/>
+    <!-- permissions réseau pour discovery & sockets -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- pour multicast/discovery sur certains appareils -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
 
     <application
         android:name=".MainApplication"

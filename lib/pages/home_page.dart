@@ -122,56 +122,6 @@ mixin AudioAnswerMixin<T extends StatefulWidget> on State<T> {
     try { AudioFeedback.instance.playEvent(SoundEvent.pageFlip); } catch (_) {}
   }
 
-  /// Helper generic pour uniformiser le traitement des réponses (optionnel).
-  /// Utilise-le si tu veux centraliser la logique au lieu de dupliquer.
-  void _handleAnswer({
-    required dynamic picked,
-    dynamic expected,
-    bool popResult = true,
-    Duration delay = const Duration(seconds: 1),
-    void Function(bool correct)? onResult,
-  }) {
-    // certaines classes définissent déjà _answered/_selectedBrand; _handleAnswer suppose
-    // que ces champs existent dans la State. Si une classe n'a pas ces champs, n'utilise pas ce helper direct.
-    try { _audioPlayTap(); } catch (_) {}
-
-    final dynamic toCompare = expected ?? (mounted ? (widget as dynamic).correctAnswer : null);
-    final bool correct = toCompare != null ? toCompare == picked : false;
-
-    // best-effort: update local fields if présents
-    try {
-      setState(() {
-        // si la classe a un _answered et _selectedBrand, on les met à jour
-        if ((this as dynamic)._answered != null) (this as dynamic)._answered = true;
-        if ((this as dynamic)._selectedBrand != null && picked is String) (this as dynamic)._selectedBrand = picked;
-        if (correct) {
-          _streak += 1;
-        } else {
-          _streak = 0;
-        }
-      });
-    } catch (_) {
-      // ignore si la State ne possède pas ces champs
-    }
-
-    if (correct) {
-      _audioPlayAnswerCorrect();
-      if (_streak > 0 && _streak % 3 == 0) _audioPlayStreak(milestone: _streak);
-    } else {
-      _audioPlayAnswerWrong();
-    }
-
-    Future.delayed(delay, () {
-      _audioPlayPageFlip();
-      if (popResult) {
-        try {
-          Navigator.of(context).pop(correct);
-          return;
-        } catch (_) {}
-      }
-      if (onResult != null) onResult(correct);
-    });
-  }
 }
 
 class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin, AudioAnswerMixin {
@@ -569,9 +519,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     try { AudioFeedback.instance.playEvent(SoundEvent.pageFlip); } catch (_) {}
   }
 
-  void _audioPlayChallengeComplete(int stars) {
-    try { AudioFeedback.instance.playEvent(SoundEvent.challengeComplete, meta: {'stars': stars}); } catch (_) {}
-  }
 
   void _showStuckPopup(int flagIndex) {
     showDialog(
@@ -1392,15 +1339,15 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     )) ?? false;
   }
 
-Future<void> _saveConsecutiveFails() async {
-  final prefs = await SharedPreferences.getInstance();
-  await prefs.setInt('consecutiveFails', _consecutiveFails);
-}
+  Future<void> _saveConsecutiveFails() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('consecutiveFails', _consecutiveFails);
+  }
 
-Future<void> _loadConsecutiveFails() async {
-  final prefs = await SharedPreferences.getInstance();
-  _consecutiveFails = prefs.getInt('consecutiveFails') ?? 0;
-}
+  Future<void> _loadConsecutiveFails() async {
+    final prefs = await SharedPreferences.getInstance();
+    _consecutiveFails = prefs.getInt('consecutiveFails') ?? 0;
+  }
 
   Future<bool> _askSpecialFeatureQuestion(int questionNumber, {required int currentScore, required int totalQuestions}) async {
     if (carData.isEmpty) return false;
@@ -2338,7 +2285,6 @@ class _HorsepowerQuestionContent extends StatefulWidget {
 class _HorsepowerQuestionContentState
     extends State<_HorsepowerQuestionContent> with AudioAnswerMixin {
   int _frameIndex = 0;
-  Timer? _frameTimer;
   bool _answered = false;
   String? _selectedAnswer;
 
@@ -2348,11 +2294,6 @@ class _HorsepowerQuestionContentState
     // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
     // Cycle frames every 2 seconds
-    _frameTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      setState(() {
-        _frameIndex = (_frameIndex + 1) % 6;
-      });
-    });
   }
 
   @override
@@ -2502,7 +2443,6 @@ class _AccelerationQuestionContent extends StatefulWidget {
 class _AccelerationQuestionContentState
     extends State<_AccelerationQuestionContent> with AudioAnswerMixin {
   int _frameIndex = 0;
-  Timer? _frameTimer;
   bool _answered = false;
   String? _selectedAnswer;
 
@@ -2512,11 +2452,6 @@ class _AccelerationQuestionContentState
     // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
     // Cycle the image every 2 seconds
-    _frameTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      setState(() {
-        _frameIndex = (_frameIndex + 1) % 6;
-      });
-    });
   }
 
   @override
@@ -2669,7 +2604,6 @@ class _MaxSpeedQuestionContent extends StatefulWidget {
 class _MaxSpeedQuestionContentState
     extends State<_MaxSpeedQuestionContent> with AudioAnswerMixin {
   int _frameIndex = 0;
-  Timer? _frameTimer;
   bool _answered = false;
   String? _selectedSpeed;
 
@@ -2679,11 +2613,6 @@ class _MaxSpeedQuestionContentState
     // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
     // Cycle frames every 2 seconds
-    _frameTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      setState(() {
-        _frameIndex = (_frameIndex + 1) % 6;
-      });
-    });
   }
 
   @override
@@ -2835,7 +2764,6 @@ class _SpecialFeatureQuestionContent extends StatefulWidget {
 class _SpecialFeatureQuestionContentState
     extends State<_SpecialFeatureQuestionContent> with AudioAnswerMixin {
   int _frameIndex = 0;
-  Timer? _frameTimer;
   bool _answered = false;
   String? _selectedFeature;
 
@@ -2845,11 +2773,6 @@ class _SpecialFeatureQuestionContentState
     // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
     // Cycle the image every 2 seconds
-    _frameTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      setState(() {
-        _frameIndex = (_frameIndex + 1) % 6;
-      });
-    });
   }
 
   @override
@@ -2997,7 +2920,6 @@ class _DescriptionToCarImageQuestionContent extends StatefulWidget {
 class _DescriptionToCarImageQuestionContentState
     extends State<_DescriptionToCarImageQuestionContent> with AudioAnswerMixin {
   int _frameIndex = 0;
-  Timer? _frameTimer;
   bool _answered = false;
   int? _selectedIndex;
 
@@ -3007,9 +2929,6 @@ class _DescriptionToCarImageQuestionContentState
     // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
     // Cycle frames every 2 seconds
-    _frameTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      setState(() => _frameIndex = (_frameIndex + 1) % 6);
-    });
   }
 
   @override
@@ -3156,7 +3075,6 @@ class _BrandImageChoiceQuestionContent extends StatefulWidget {
 class _BrandImageChoiceQuestionContentState
     extends State<_BrandImageChoiceQuestionContent> with AudioAnswerMixin {
   int _frameIndex = 0;
-  Timer? _frameTimer;
   bool _answered = false;
   String? _selectedBrand;
 
@@ -3166,9 +3084,6 @@ class _BrandImageChoiceQuestionContentState
     // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
     // Cycle through frames every 2 seconds
-    _frameTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      setState(() => _frameIndex = (_frameIndex + 1) % 6);
-    });
   }
 
   @override
@@ -3316,7 +3231,6 @@ class _OriginCountryQuestionContent extends StatefulWidget {
 class _OriginCountryQuestionContentState
     extends State<_OriginCountryQuestionContent> with AudioAnswerMixin {
   int _frameIndex = 0;
-  Timer? _frameTimer;
   bool _answered = false;
   String? _selectedOrigin;
 
@@ -3326,9 +3240,6 @@ class _OriginCountryQuestionContentState
     // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
     // Cycle frames every 2 seconds
-    _frameTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      setState(() => _frameIndex = (_frameIndex + 1) % 6);
-    });
   }
 
   @override
@@ -3477,7 +3388,6 @@ class _ModelOnlyImageQuestionContent extends StatefulWidget {
 class _ModelOnlyImageQuestionContentState
     extends State<_ModelOnlyImageQuestionContent> with AudioAnswerMixin {
   int _frameIndex = 0;
-  Timer? _frameTimer;
   bool _answered = false;
   String? _selectedModel;
 
@@ -3487,9 +3397,6 @@ class _ModelOnlyImageQuestionContentState
     // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
     // Alterner les frames toutes les 2 secondes
-    _frameTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      setState(() => _frameIndex = (_frameIndex + 1) % 6);
-    });
   }
 
   @override

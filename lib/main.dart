@@ -16,10 +16,9 @@ import 'services/sound_manager.dart';
 import 'storage/lives_storage.dart';
 import 'package:tutorial_coach_mark/tutorial_coach_mark.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'firebase_options.dart';
+import 'services/firebase_options.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'pages/race_page.dart';
-import 'package:flutter/foundation.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 
 final GlobalKey<ScaffoldMessengerState> scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
@@ -43,6 +42,7 @@ void main() async {
   // AndroidProvider.playIntegrity for production builds.
   try {
     await FirebaseAppCheck.instance.activate(
+      // ignore: deprecated_member_use
       androidProvider: AndroidProvider.debug,
       // iosProvider: AppleProvider.debug, // uncomment if you also run local iOS debug builds
     );
