@@ -1,9 +1,14 @@
+// --- add/replace these imports at the top of the file ---
+import 'dart:async';
 import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'package:flutter/services.dart' show rootBundle;
+
 import '../services/audio_feedback.dart';
 import '../services/image_service_cache.dart';
+import '../services/collab_wan_service.dart'; // <<-- NEW
 
 class RacePage extends StatefulWidget {
   const RacePage({Key? key}) : super(key: key);
@@ -58,11 +63,14 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   late final AnimationController _carController;
   final TextEditingController _nameController = TextEditingController();
 
-  // current travel distance along the path (pixels)
-  double _carDistance = 0.0;
-
-  // store the chosen question sequence for the race
-  List<int> _selectedIndicesForRace = [];
+  // --- Collab / players state ---
+  final CollabWanService _collab = CollabWanService();
+  StreamSubscription<List<PlayerInfo>>? _playersSub;
+  List<PlayerInfo> _playersInRoom = [];
+  String? _currentRoomCode;
+  Timer? _presenceTimer;
+  bool _waitingForNextQuestion = false;
+  StreamSubscription<List<CollabMessage>>? _messagesSub;
 
   // quiz / step-race state
   List<int> _quizSelectedIndices = [];
@@ -70,153 +78,44 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   int _quizScore = 0;
   double _currentDistance = 0.0; // traveled distance in px along path
   double _stepDistance = 0.0;    // _totalPathLength / totalQuestions
-  bool _quizInProgress = false;
 
   // --- path data for tracks (normalized coords in [0..1]) ---
   // Monza (RaceTrack0) — the list you asked for
   final List<List<double>> _monzaNorm = [
-    [0.75, 0.32],    //[x, y]
-    [0.75, 0.23],
-    [0.65, 0.20], //2
-    [0.55, 0.23],
-    [0.50, 0.30],
-    [0.45, 0.37],
-    [0.20, 0.40], //6
-    [0.18, 0.50],
-    [0.20, 0.55],
-    [0.28, 0.60], //9
-    [0.31, 0.70],
-    [0.30, 0.80], //11
-    [0.40, 0.82],
-    [0.72, 0.80], //13
-    [0.75, 0.75],
-    [0.72, 0.65], //15
-    [0.50, 0.62],
-    [0.52, 0.52], //17
-    [0.75, 0.37],
-    [0.75, 0.32]
+    [0.75, 0.32],[0.75, 0.23],[0.65, 0.20],[0.55, 0.23],[0.50, 0.30],[0.45, 0.37],[0.20, 0.40],
+    [0.18, 0.50],[0.20, 0.55],[0.28, 0.60],[0.31, 0.70],[0.30, 0.80],[0.40, 0.82],[0.72, 0.80],
+    [0.75, 0.75],[0.72, 0.65],[0.50, 0.62],[0.52, 0.52],[0.75, 0.37],[0.75, 0.32]
   ];
 
   // Monaco (RaceTrack1) — normalized centerline waypoints
   final List<List<double>> _monacoNorm = [
-    [0.55, 0.81],
-    [0.71, 0.75],
-    [0.80, 0.63], //2
-    [0.76, 0.52],
-    [0.70, 0.48], //4
-    [0.48, 0.45],
-    [0.46, 0.40], //6
-    [0.53, 0.34],
-    [0.75, 0.36], //8
-    [0.82, 0.30],
-    [0.80, 0.22], //10
-    [0.71, 0.19],
-    [0.57, 0.23], //12
-    [0.45, 0.19],
-    [0.38, 0.12], //14
-    [0.26, 0.11],
-    [0.21, 0.17], //16
-    [0.30, 0.33],
-    [0.28, 0.37], //18
-    [0.14, 0.44],
-    [0.10, 0.51], //20
-    [0.20, 0.56],
-    [0.38, 0.56], //22
-    [0.45, 0.60],
-    [0.41, 0.66], //24
-    [0.21, 0.70],
-    [0.15, 0.74], //26
-    [0.20, 0.82],
-    [0.38, 0.85], //28
-    [0.55, 0.81]
+    [0.55, 0.81],[0.71, 0.75],[0.80, 0.63],[0.76, 0.52],[0.70, 0.48],[0.48, 0.45],[0.46, 0.40],
+    [0.53, 0.34],[0.75, 0.36],[0.82, 0.30],[0.80, 0.22],[0.71, 0.19],[0.57, 0.23],[0.45, 0.19],
+    [0.38, 0.12],[0.26, 0.11],[0.21, 0.17],[0.30, 0.33],[0.28, 0.37],[0.14, 0.44],[0.10, 0.51],
+    [0.20, 0.56],[0.38, 0.56],[0.45, 0.60],[0.41, 0.66],[0.21, 0.70],[0.15, 0.74],[0.20, 0.82],
+    [0.38, 0.85],[0.55, 0.81]
   ];
 
   final List<List<double>> _suzukaNorm = [
-    [0.76, 0.79],
-    [0.75, 0.19],
-    [0.67, 0.13], //2
-    [0.34, 0.13],
-    [0.21, 0.18], //4
-    [0.25, 0.28],
-    [0.49, 0.36], //6
-    [0.51, 0.45],
-    [0.46, 0.50], //8
-    [0.26, 0.53],
-    [0.24, 0.64], //10
-    [0.35, 0.72],
-    [0.48, 0.75], //12
-    [0.54, 0.84],
-    [0.69, 0.86], //14
-    [0.74, 0.81],
-    [0.76, 0.79] //16
+    [0.76, 0.79],[0.75, 0.19],[0.67, 0.13],[0.34, 0.13],[0.21, 0.18],[0.25, 0.28],[0.49, 0.36],
+    [0.51, 0.45],[0.46, 0.50],[0.26, 0.53],[0.24, 0.64],[0.35, 0.72],[0.48, 0.75],[0.54, 0.84],
+    [0.69, 0.86],[0.74, 0.81],[0.76, 0.79]
   ];
 
   final List<List<double>> _spaNorm = [
-    [0.69, 0.88],
-    [0.74, 0.85],
-    [0.71, 0.79], //2
-    [0.47, 0.75],
-    [0.42, 0.70], //4
-    [0.46, 0.64],
-    [0.55, 0.59], //6
-    [0.66, 0.62],
-    [0.75, 0.66], //8
-    [0.82, 0.52],
-    [0.69, 0.40], //10
-    [0.77, 0.18],
-    [0.67, 0.09], //12
-    [0.56, 0.11],
-    [0.60, 0.24], //14
-    [0.44, 0.29],
-    [0.26, 0.23], //16
-    [0.14, 0.26],
-    [0.14, 0.37], //18
-    [0.40, 0.41],
-    [0.47, 0.48], //20
-    [0.43, 0.53],
-    [0.20, 0.55], //22
-    [0.13, 0.77],
-    [0.23, 0.84], //24
-    [0.69, 0.88]
+    [0.69, 0.88],[0.74, 0.85],[0.71, 0.79],[0.47, 0.75],[0.42, 0.70],[0.46, 0.64],[0.55, 0.59],
+    [0.66, 0.62],[0.75, 0.66],[0.82, 0.52],[0.69, 0.40],[0.77, 0.18],[0.67, 0.09],[0.56, 0.11],
+    [0.60, 0.24],[0.44, 0.29],[0.26, 0.23],[0.14, 0.26],[0.14, 0.37],[0.40, 0.41],[0.47, 0.48],
+    [0.43, 0.53],[0.20, 0.55],[0.13, 0.77],[0.23, 0.84],[0.69, 0.88]
   ];
 
 
   final List<List<double>> _silverstoneNorm = [
-    [0.82, 0.75],
-    [0.81, 0.43],
-    [0.73, 0.35], //2
-    [0.73, 0.28],
-    [0.77, 0.18], //4
-    [0.71, 0.12],
-    [0.63, 0.14], //6
-    [0.57, 0.24],
-    [0.47, 0.30], //8
-    [0.40, 0.37],
-    [0.30, 0.36], //10
-    [0.29, 0.30],
-    [0.34, 0.26], //12
-    [0.42, 0.19],
-    [0.42, 0.12], //14
-    [0.32, 0.07],
-    [0.19, 0.07], //16
-    [0.13, 0.13],
-    [0.13, 0.63], //20
-    [0.07, 0.72],
-    [0.11, 0.80], //22
-    [0.21, 0.85],
-    [0.28, 0.79], //24
-    [0.29, 0.69],
-    [0.41, 0.62], //26
-    [0.37, 0.51],
-    [0.46, 0.47], //28
-    [0.58, 0.49],
-    [0.60, 0.53], //30
-    [0.53, 0.64],
-    [0.60, 0.74], //32
-    [0.51, 0.82],
-    [0.58, 0.88], //34
-    [0.73, 0.90],
-    [0.80, 0.83], //36
+    [0.82, 0.75],[0.81, 0.43],[0.73, 0.35],[0.73, 0.28],[0.77, 0.18],[0.71, 0.12],[0.63, 0.14],
+    [0.57, 0.24],[0.47, 0.30],[0.40, 0.37],[0.30, 0.36],[0.29, 0.30],[0.34, 0.26],[0.42, 0.19],
+    [0.42, 0.12],[0.32, 0.07],[0.19, 0.07],[0.13, 0.13],[0.13, 0.63],[0.07, 0.72],[0.11, 0.80],
+    [0.21, 0.85],[0.28, 0.79],[0.29, 0.69],[0.41, 0.62],[0.37, 0.51],[0.46, 0.47],[0.58, 0.49],
+    [0.60, 0.53],[0.53, 0.64],[0.60, 0.74],[0.51, 0.82],[0.58, 0.88],[0.73, 0.90],[0.80, 0.83],
     [0.82, 0.75]
   ];
 
@@ -245,30 +144,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         .join();
   }
 
-  // Placeholder "question" page: very small dialog that simulates a question.
-  // We'll replace it with the real per-type question pages in the next block.
-  Future<bool> _placeholderQuestion(int questionNumber, {required int currentScore, required int totalQuestions}) async {
-    final chosen = await showDialog<int>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) {
-        return AlertDialog(
-          title: Text('Question #$questionNumber (placeholder)'),
-          content: const Text('This is a placeholder question. Tap an answer.'),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(ctx).pop(0), child: const Text('A (wrong)')),
-            TextButton(onPressed: () => Navigator.of(ctx).pop(1), child: const Text('B (wrong)')),
-            TextButton(onPressed: () => Navigator.of(ctx).pop(2), child: const Text('C (wrong)')),
-            TextButton(onPressed: () => Navigator.of(ctx).pop(3), child: const Text('D (correct)')),
-          ],
-        );
-      },
-    );
-
-    // treat choice 3 (D) as correct for placeholder
-    return (chosen == 3);
-  }
-
   // small helper to start the car animation
   void _startCar() {
     setState(() {
@@ -279,87 +154,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
   // --- Car data used by the questions (same CSV used in home_page.dart) ---
   List<Map<String, String>> carData = [];
-
-  Future<void> _askAllQuestionsThenStart() async {
-    // ensure car data loaded
-    if (carData.isEmpty) {
-      await _loadCarData();
-      if (carData.isEmpty) {
-        // nothing to ask
-        await showDialog(
-          context: context,
-          builder: (_) => AlertDialog(
-            title: const Text('No data'),
-            content: const Text('No car data available for the quiz.'),
-            actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('OK'))],
-          ),
-        );
-        return;
-      }
-    }
-
-    // choose number of questions based on active track as a fallback, default to 12
-    final questionsPerTrack = {0: 5, 1: 9, 2: 12, 3: 16, 4: 20};
-    final idx = _safeIndex(_activeTrackIndex);
-    final totalQuestions = questionsPerTrack[idx] ?? 12;
-
-    // build selectedIndices using similar difficulty distribution logic (keeps variety)
-    List<int> selectedIndices = [];
-    final fullPool = <int>[]..addAll(_easyQuestions)..addAll(_mediumQuestions)..addAll(_hardQuestions);
-
-    if (totalQuestions <= 12) {
-      // preserve previous "4 easy / 4 medium / rest hard" behavior when <=12
-      if (totalQuestions <= 4) {
-        final tmp = List<int>.from(_easyQuestions)..shuffle();
-        selectedIndices = tmp.take(totalQuestions).toList();
-      } else if (totalQuestions <= 8) {
-        final e = List<int>.from(_easyQuestions)..shuffle();
-        final m = List<int>.from(_mediumQuestions)..shuffle();
-        selectedIndices = []
-          ..addAll(e.take(4))
-          ..addAll(m.take(totalQuestions - 4));
-      } else {
-        final e = List<int>.from(_easyQuestions)..shuffle();
-        final m = List<int>.from(_mediumQuestions)..shuffle();
-        final h = List<int>.from(_hardQuestions)..shuffle();
-        selectedIndices = []
-          ..addAll(e.take(4))
-          ..addAll(m.take(4))
-          ..addAll(h.take(totalQuestions - 8));
-      }
-    } else {
-      // For >12 questions (Spa/Silverstone) repeat shuffled full 12-type chunks.
-      final rng = Random();
-      final repeated = <int>[];
-      while (repeated.length < totalQuestions) {
-        final chunk = List<int>.from(fullPool)..shuffle(rng);
-        repeated.addAll(chunk);
-      }
-      selectedIndices = repeated.take(totalQuestions).toList();
-    }
-
-    int quizScore = 0;
-    for (int i = 0; i < selectedIndices.length; i++) {
-      final qIndex = selectedIndices[i];
-      final method = handlerByIndex[qIndex]!;
-      final correct = await method(i + 1, currentScore: quizScore, totalQuestions: selectedIndices.length);
-      if (correct) quizScore++;
-      if (!mounted) return;
-    }
-
-    // show summary
-    await showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Quiz complete'),
-        content: Text('You scored $quizScore / ${selectedIndices.length}. Starting the race...'),
-        actions: [TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('OK'))],
-      ),
-    );
-
-    // start car
-    _startCar();
-  }
 
   // class-level handler map so any method can access it
   Map<int, Future<bool> Function(int, {required int currentScore, required int totalQuestions})> get handlerByIndex => {
@@ -393,7 +187,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
               _inPublicRaceView = false;
               _activeTrackIndex = null;
               _raceStarted = false;
-              _quizInProgress = false;
               _quizSelectedIndices = [];
               _quizCurrentPos = 0;
               _quizScore = 0;
@@ -407,6 +200,14 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       ),
     );
     return res == true;
+  }
+
+  // Given a player's score, return their distance along the track
+  double _distanceForPlayer(PlayerInfo player) {
+    if (_quizSelectedIndices.isEmpty || _stepDistance <= 0) return 0.0;
+    final maxScore = _quizSelectedIndices.length;
+    final progress = player.score / maxScore;
+    return progress * _totalPathLength;
   }
 
   // pick a random valid car entry (non-empty map)
@@ -772,8 +573,8 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       _quizSelectedIndices = selectedIndices;
       _quizCurrentPos = 0;
       _quizScore = 0;
-      _quizInProgress = true;
       _currentDistance = 0.0;
+      _waitingForNextQuestion = false;
     });
 
     // Give layout one frame so LayoutBuilder can call _preparePath and compute _totalPathLength.
@@ -807,7 +608,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     if (_quizCurrentPos >= _quizSelectedIndices.length) {
       // finished all steps -> start full continuous race
       setState(() {
-        _quizInProgress = false;
       });
       _startCar();
       return;
@@ -841,21 +641,38 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     if (correct) {
       _quizScore++;
       _quizCurrentPos++;
-      // Only advance the car if the answer was correct.
+      // Update local player's score via CollabWanService
+      if (_currentRoomCode != null) {
+        final localPlayerId = _collab.localPlayerId;
+        await _collab.sendMessage(_currentRoomCode!, {
+          'type': 'score_update',
+          'playerId': localPlayerId,
+          'score': _quizScore,
+        });
+      }
       await _advanceByStep();
+      // Set waiting for next question
+      setState(() {
+        _waitingForNextQuestion = true;
+      });
     } else {
-      // If incorrect, do NOT increment _quizCurrentPos: present another question
-      // (same position) — keep _quizCurrentPos unchanged so user must pass this step.
-      // Do not advance the car.
-      // short delay to avoid abrupt push/pop
-      await Future.delayed(const Duration(milliseconds: 120));
+      // Update local player's errors via CollabWanService
+      if (_currentRoomCode != null) {
+        final localPlayerId = _collab.localPlayerId;
+        final currentErrors = _playersInRoom
+            .firstWhere((p) => p.id == localPlayerId, orElse: () => PlayerInfo(id: '', displayName: '', lastSeen: DateTime.now(), score: 0, errors: 0))
+            .errors;
+        await _collab.sendMessage(_currentRoomCode!, {
+          'type': 'error_update',
+          'playerId': localPlayerId,
+          'errors': currentErrors + 1,
+        });
+      }
+      // Set waiting for next question
+      setState(() {
+        _waitingForNextQuestion = true;
+      });
     }
-
-    // If aborted after advancing/delay, stop now.
-    if (_raceAborted || !_inPublicRaceView) return;
-
-    // Next question
-    return _askNextQuestion();
   }
 
   Future<void> _advanceByStep() async {
@@ -932,8 +749,13 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
   @override
   void dispose() {
+    // Leave room (fire-and-forget)
+    try { _leaveCurrentRoom(); } catch (_) {}
     _carController.dispose();
     _nameController.dispose();
+    try { _playersSub?.cancel(); } catch (_) {}
+    try { _messagesSub?.cancel(); } catch (_) {}
+    _presenceTimer?.cancel();
     super.dispose();
   }
 
@@ -993,6 +815,49 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
             width: 60,
             height: 2,
             color: selected ? Colors.red : Colors.transparent,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPlayerStatLine({required PlayerInfo player, required bool isLocal}) {
+    return Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.grey[900],
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: const [BoxShadow(blurRadius: 4, color: Colors.black26, offset: Offset(0, 2))],
+      ),
+      child: Row(
+        children: [
+          CircleAvatar(
+            radius: 18,
+            backgroundColor: isLocal ? Colors.blue : Colors.green,
+            child: Text(
+              player.displayName.isNotEmpty ? player.displayName[0].toUpperCase() : '?',
+              style: const TextStyle(color: Colors.white),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              player.displayName,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Row(
+            children: [
+              Icon(Icons.star, size: 14, color: Colors.amber[400]),
+              const SizedBox(width: 4),
+              Text('${player.score} pts', style: TextStyle(fontSize: 12, color: Colors.grey[200])),
+              const SizedBox(width: 8),
+              Icon(Icons.error, size: 14, color: Colors.red[400]),
+              const SizedBox(width: 4),
+              Text('${player.errors} err', style: TextStyle(fontSize: 12, color: Colors.grey[200])),
+            ],
           ),
         ],
       ),
@@ -1080,11 +945,9 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                 Navigator.of(context).pop();
 
                 // 3) Wait a short moment so the keyboard/layout settles, then join.
-                //    This avoids preparing the path with an incorrect (temporarily smaller)
-                //    height caused by the keyboard being visible.
                 Future.delayed(const Duration(milliseconds: 250), () {
                   if (!mounted) return;
-                  _joinPublicGame(index);
+                  _joinPublicGame(index, playerName);
                 });
               },
               child: const Text('Join'),
@@ -1158,12 +1021,13 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     );
   }
 
-  void _joinPublicGame(int index) {
+  // join a public game for a given track index and display name
+  Future<void> _joinPublicGame(int index, String displayName) async {
+    // mark UI state (local)
     setState(() {
       _activeTrackIndex = index;
       _inPublicRaceView = true;
       _raceStarted = false;
-      _quizInProgress = false;
       _quizSelectedIndices = [];
       _quizCurrentPos = 0;
       _quizScore = 0;
@@ -1171,11 +1035,129 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       _pathPoints = [];
       _cumLengths = [];
       _totalPathLength = 0.0;
-      _raceAborted = false; // <--- reset abort flag
+      _raceAborted = false;
     });
 
     _carController.stop();
     _carController.reset();
+
+    // make a deterministic room code per track so players choosing same track meet
+    final roomCode = 'TRACK_${index}';
+    _currentRoomCode = roomCode;
+
+    try {
+      // create/join room (createRoom calls joinRoom internally)
+      await _collab.createRoom(roomCode, displayName: displayName);
+
+      // initial presence touch
+      unawaited(_collab.touchPresence(roomCode));
+      // Clean up stale players when joining
+      await _collab.cleanupStalePlayers(roomCode, ttl: const Duration(seconds: 15));
+
+      // subscribe to players list
+      _playersSub?.cancel();
+      _playersSub = _collab.playersStream(roomCode).listen((players) {
+        if (!mounted) return;
+        // Merge the incoming players with the current _playersInRoom to preserve score/errors
+        setState(() {
+          _playersInRoom = players.map((newPlayer) {
+            final existingPlayer = _playersInRoom.firstWhere(
+              (p) => p.id == newPlayer.id,
+              orElse: () => newPlayer,
+            );
+            return PlayerInfo(
+              id: newPlayer.id,
+              displayName: newPlayer.displayName,
+              lastSeen: newPlayer.lastSeen,
+              score: existingPlayer.score,
+              errors: existingPlayer.errors,
+            );
+          }).toList();
+        });
+        // Auto-start if 2+ players and not already started
+        if (!_raceStarted && players.length >= 2) {
+          debugPrint('Starting race with ${players.length} players!');
+          _startQuizRace();
+        }
+      });
+
+      // Listen for score/error updates via messages
+      _messagesSub = _collab.messagesStream(_currentRoomCode!).listen((messages) {
+        for (final msg in messages) {
+          if (msg.payload['type'] == 'score_update') {
+            setState(() {
+              _playersInRoom = _playersInRoom.map((p) {
+                if (p.id == msg.payload['playerId']) {
+                  return PlayerInfo(
+                    id: p.id,
+                    displayName: p.displayName,
+                    lastSeen: p.lastSeen,
+                    score: msg.payload['score'],
+                    errors: p.errors,
+                  );
+                }
+                return p;
+              }).toList();
+            });
+          } else if (msg.payload['type'] == 'error_update') {
+            setState(() {
+              _playersInRoom = _playersInRoom.map((p) {
+                if (p.id == msg.payload['playerId']) {
+                  return PlayerInfo(
+                    id: p.id,
+                    displayName: p.displayName,
+                    lastSeen: p.lastSeen,
+                    score: p.score,
+                    errors: msg.payload['errors'],
+                  );
+                }
+                return p;
+              }).toList();
+            });
+          }
+        }
+      });
+
+      // periodic presence update
+      _presenceTimer?.cancel();
+      _presenceTimer = Timer.periodic(const Duration(seconds: 8), (_) {
+        if (_currentRoomCode != null) {
+          _collab.touchPresence(_currentRoomCode!);
+        }
+      });
+    } catch (e) {
+      debugPrint('Failed to join/create room $roomCode: $e');
+      // tidy up and give feedback
+      _playersSub?.cancel();
+      _presenceTimer?.cancel();
+      _playersInRoom = [];
+      _currentRoomCode = null;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Unable to join multiplayer room: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _leaveCurrentRoom() async {
+    final room = _currentRoomCode;
+    _presenceTimer?.cancel();
+    _presenceTimer = null;
+    try {
+      if (room != null) {
+        await _collab.leaveRoom(room);
+      }
+    } catch (_) {}
+    try { await _playersSub?.cancel(); } catch (_) {}
+    _playersSub = null;
+    if (mounted) {
+      setState(() {
+        _playersInRoom = [];
+        _currentRoomCode = null;
+        _raceStarted = false; // Reset race state
+      });
+    }
   }
 
   // helper to clamp index safely
@@ -1287,40 +1269,26 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                 ),
               ),
 
-              // Animated car following the prepared path
               Positioned.fill(
                 child: LayoutBuilder(
                   builder: (context, constraints) {
                     final W = constraints.maxWidth;
                     final H = constraints.maxHeight;
                     final idx = _safeIndex(_activeTrackIndex);
-
-                    // Prepare path if needed
                     if (_pathPoints.isEmpty) _preparePath(W, H, idx);
-
                     return AnimatedBuilder(
                       animation: _carController,
                       builder: (context, child) {
-                        // compute car position
-                        Offset pos;
-                        double angle = 0.0;
-
+                        final children = <Widget>[];
+                        // Add local player's car
                         if (_raceStarted) {
                           final distance = _carController.value * _totalPathLength;
                           final pa = _posAngleAtDistance(distance);
-                          pos = pa['pos'];
-                          angle = pa['angle'];
-                        } else {
-                          pos = _pathPoints.isNotEmpty
-                              ? _pathPoints.first
-                              : Offset(W / 2 - 18, H / 2 - 12);
-                        }
-
-                        final left = pos.dx.clamp(0.0, W - 36);
-                        final top = pos.dy.clamp(0.0, H - 24);
-
-                        return Stack(
-                          children: [
+                          final pos = pa['pos'];
+                          final angle = pa['angle'];
+                          final left = pos.dx.clamp(0.0, W - 36);
+                          final top = pos.dy.clamp(0.0, H - 24);
+                          children.add(
                             Positioned(
                               left: left,
                               top: top,
@@ -1333,8 +1301,33 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                                 ),
                               ),
                             ),
-                          ],
-                        );
+                          );
+                        }
+                        // Add other players' cars
+                        for (final player in _playersInRoom) {
+                          if (player.id == _collab.localPlayerId) continue; // Skip local player
+                          final distance = _distanceForPlayer(player);
+                          final pa = _posAngleAtDistance(distance);
+                          final pos = pa['pos'];
+                          final angle = pa['angle'];
+                          final left = pos.dx.clamp(0.0, W - 36);
+                          final top = pos.dy.clamp(0.0, H - 24);
+                          children.add(
+                            Positioned(
+                              left: left,
+                              top: top,
+                              child: Transform.rotate(
+                                angle: angle,
+                                child: SizedBox(
+                                  width: 36,
+                                  height: 24,
+                                  child: Image.asset('assets/home/car_opponent.png', fit: BoxFit.contain),
+                                ),
+                              ),
+                            ),
+                          );
+                        }
+                        return Stack(children: children);
                       },
                     );
                   },
@@ -1356,17 +1349,20 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                         padding: const EdgeInsets.symmetric(horizontal: 12),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                       ),
-                      onPressed: () {
+                      onPressed: () async {
                         _carController.stop();
+                        // leave collab room and cleanup
+                        await _leaveCurrentRoom();
+                        if (!mounted) return;
                         setState(() {
                           _inPublicRaceView = false;
                           _activeTrackIndex = null;
                           _raceStarted = false;
-                          _quizInProgress = false;
                           _quizSelectedIndices = [];
                           _quizCurrentPos = 0;
                           _quizScore = 0;
                           _currentDistance = 0.0;
+                          _waitingForNextQuestion = false;
                         });
                       },
                       child: const Text(
@@ -1377,24 +1373,50 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                   ),
                 ),
               ),
-      
-              // Center Start button: only show when not started yet
-              if (!_raceStarted)
+
+              // In the Stack of _buildPublicRaceView(), add:
+              if (!_raceStarted && _playersInRoom.length < 2)
                 Positioned.fill(
                   child: Center(
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red,
-                        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    child: Container(
+                      padding: EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(8),
                       ),
-                      onPressed: () async {
-                        // start the step-quiz race workflow
-                        await _startQuizRace();
-                      },
-                      child: const Text(
-                        'Start',
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      child: Text(
+                        'Waiting for another player...',
+                        style: TextStyle(color: Colors.white, fontSize: 16),
+                      ),
+                    ),
+                  ),
+                ),
+
+              if (_waitingForNextQuestion)
+                Positioned(
+                  top: 12,
+                  right: 12,
+                  child: SafeArea(
+                    minimum: const EdgeInsets.only(right: 8, top: 8),
+                    child: SizedBox(
+                      height: 36,
+                      child: TextButton(
+                        style: TextButton.styleFrom(
+                          backgroundColor: Colors.black45,
+                          minimumSize: const Size(120, 36),
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                        onPressed: () async {
+                          setState(() {
+                            _waitingForNextQuestion = false;
+                          });
+                          await _askNextQuestion();
+                        },
+                        child: const Text(
+                          'Next Question',
+                          style: TextStyle(color: Colors.white, fontSize: 14),
+                        ),
                       ),
                     ),
                   ),
@@ -1402,24 +1424,54 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
             ],
           ),
         ),
-        // Bottom reserved area for other players' stats (adjust height as you want)
+        // Bottom reserved area for other players' stats
         Container(
-          height: 120, // reserved space
+          height: 120, // Adjusted height
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           color: Theme.of(context).scaffoldBackgroundColor,
-          child: Row(
-            children: [
-              // Placeholder: replace with real players list / stats widgets
-              Expanded(
-                child: Text(
-                  'Players stats (placeholder)',
-                  style: TextStyle(fontSize: 14, color: Colors.grey[700]),
-                ),
-              ),
-
-              const SizedBox(width: 8),
-            ],
+          child: SingleChildScrollView( // Allow scrolling if content overflows
+            child: Column(
+              children: [
+                // Local user line
+                if (_playersInRoom.isNotEmpty)
+                  _buildPlayerStatLine(
+                    player: _playersInRoom.firstWhere(
+                      (p) => p.displayName == _nameController.text.trim(),
+                      orElse: () => PlayerInfo(id: '', displayName: 'You', lastSeen: DateTime.now(), score: _quizScore, errors: 0),
+                    ),
+                    isLocal: true,
+                  ),
+                const SizedBox(height: 8),
+                // Other user line
+                if (_playersInRoom.length >= 2)
+                  _buildPlayerStatLine(
+                    player: _playersInRoom.firstWhere(
+                      (p) => p.displayName != _nameController.text.trim(),
+                      orElse: () => PlayerInfo(id: '', displayName: 'Opponent', lastSeen: DateTime.now(), score: 0, errors: 0),
+                    ),
+                    isLocal: false,
+                  ),
+                if (_playersInRoom.isEmpty || _playersInRoom.length < 2)
+                  Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _playersInRoom.isEmpty
+                            ? 'Waiting for players to join this track...'
+                            : 'Waiting for one more player to start the game...',
+                        style: TextStyle(fontSize: 14, color: Colors.grey[700]),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Share this device with friends — they will join the same track automatically.',
+                        style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
           ),
         ),
       ],

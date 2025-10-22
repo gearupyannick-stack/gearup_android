@@ -27,20 +27,32 @@ class PlayerInfo {
   final String id;
   final String displayName;
   final DateTime lastSeen;
+  final int score;
+  final int errors;
 
-  PlayerInfo({required this.id, required this.displayName, required this.lastSeen});
+  PlayerInfo({
+    required this.id,
+    required this.displayName,
+    required this.lastSeen,
+    this.score = 0,
+    this.errors = 0,
+  });
 
   factory PlayerInfo.fromMap(String id, Map<String, dynamic> m) {
     return PlayerInfo(
       id: id,
       displayName: m['displayName'] as String? ?? 'Guest',
       lastSeen: (m['lastSeen'] is Timestamp) ? (m['lastSeen'] as Timestamp).toDate() : DateTime.now(),
+      score: m['score'] as int? ?? 0,
+      errors: m['errors'] as int? ?? 0,
     );
   }
 
   Map<String, dynamic> toMap() => <String, dynamic>{
         'displayName': displayName,
         'lastSeen': FieldValue.serverTimestamp(),
+        'score': score,
+        'errors': errors,
       };
 }
 
