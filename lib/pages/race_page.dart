@@ -998,31 +998,121 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     return Scaffold(
       body: Column(
         children: [
-          // Show selector only when NOT in the race view
-          if (!_inPublicRaceView) ...[
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 12.0, horizontal: 20),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  _buildModeButton("Public Room", true),
-                  _buildModeButton("Private Room", false),
-                ],
+          // ===== Top block (buttons only) that slides as one piece =====
+          ClipRect(
+            child: AnimatedSlide(
+              // Offset in fraction of the size : (0, -1) moves it up by its own height
+              offset: _inPublicRaceView ? const Offset(0, -1) : Offset.zero,
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOut,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12.0, horizontal: 20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min, // so slide uses the effective height
+                  children: [
+                    // Mode buttons row only (promo removed)
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        _buildModeButton("Public Room", true),
+                        _buildModeButton("Private Room", false),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    const Divider(thickness: 0.5),
+                  ],
+                ),
               ),
             ),
-            const Divider(thickness: 0.5),
-          ],
-          // ===== Content Zone: tracks grid or race view =====
+          ),
+
+          // ===== Content zone (tracks grid + coming-soon promo OR race view) =====
           Expanded(
             child: AnimatedSwitcher(
               duration: const Duration(milliseconds: 250),
               child: _inPublicRaceView
                   ? _buildRaceView()
-                  : _buildTracksGrid(isPrivate: !isPublicMode),
+                  // when NOT in race view, we show the tracks grid AND the promo below it
+                  : _buildTracksWithPromo(isPrivate: !isPublicMode),
             ),
           ),
         ],
       ),
+    );
+  }
+
+  // Remplace la fonction _buildTracksWithPromo par celle-ci
+  Widget _buildTracksWithPromo({required bool isPrivate}) {
+    // On retourne directement la grille scrollable qui contient déjà
+    // le SliverToBoxAdapter avec le promo — plus aucun bloc promo "statique"
+    // en dehors de la scroll view.
+    return _buildTracksGrid(isPrivate: isPrivate);
+  }
+
+  Widget _buildComingSoonPromo() {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 250),
+      switchInCurve: Curves.easeOut,
+      switchOutCurve: Curves.easeIn,
+      child: isPublicMode
+          ? Column(
+              key: const ValueKey('leaderboard_promo_in_grid'),
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'LEADERBOARD — COMING SOON',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.redAccent,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'A space to see top players and your rank — stay tuned!',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  height: 250,
+                  child: Image.asset(
+                    'assets/home/leaderboard_coming_soon.png',
+                    fit: BoxFit.contain,
+                  ),
+                ),
+              ],
+            )
+          : Column(
+              key: const ValueKey('clubs_promo_in_grid'),
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'CLUBS — COMING SOON',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.redAccent,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Create car-lover clubs and compete with other clubs — coming soon!',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  height: 250,
+                  child: Image.asset(
+                    'assets/home/clubs_coming_soon.png',
+                    fit: BoxFit.contain,
+                  ),
+                ),
+              ],
+            ),
     );
   }
 
@@ -1097,19 +1187,42 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     );
   }
 
-  // ===== Grid of 5 track buttons (shared for Public & Private) =====
+  // Remplace la fonction _buildTracksGrid par ceci :
   Widget _buildTracksGrid({required bool isPrivate}) {
     final titles = ['Monza', 'Monaco', 'Suzuka', 'Spa', 'Silverstone', 'Random'];
-    return GridView.count(
+
+    // On utilise CustomScrollView + SliverGrid pour que la grille soit scrollable
+    // et qu'on puisse ajouter ensuite un SliverToBoxAdapter pour le promo.
+    return CustomScrollView(
       key: ValueKey(isPrivate ? 'privateTracks' : 'publicTracks'),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      crossAxisCount: 2,
-      mainAxisSpacing: 12,
-      crossAxisSpacing: 12,
-      childAspectRatio: 1.05,
-      children: List.generate(6, (i) {
-        return _buildTrackButton(i, titles[i], isPrivate: isPrivate);
-      }),
+      slivers: [
+        SliverPadding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          sliver: SliverGrid(
+            delegate: SliverChildBuilderDelegate(
+              (context, i) => _buildTrackButton(i, titles[i], isPrivate: isPrivate),
+              childCount: titles.length,
+            ),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              mainAxisSpacing: 12,
+              crossAxisSpacing: 12,
+              childAspectRatio: 1.05,
+            ),
+          ),
+        ),
+
+        // Promo "Coming soon" placé **après** la grille — il défile avec la grille.
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
+            child: _buildComingSoonPromo(),
+          ),
+        ),
+
+        // petit espace en bas
+        const SliverToBoxAdapter(child: SizedBox(height: 24)),
+      ],
     );
   }
 
