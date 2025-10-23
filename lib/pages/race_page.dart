@@ -78,6 +78,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   int _quizScore = 0;
   double _currentDistance = 0.0; // traveled distance in px along path
   double _stepDistance = 0.0;    // _totalPathLength / totalQuestions
+  String? _roomCreatorId;
 
   // --- path data for tracks (normalized coords in [0..1]) ---
   // Monza (RaceTrack0) — the list you asked for
@@ -128,6 +129,12 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
   // small epsilon for numeric stability
   static const double _eps = 1e-6;
+
+  Future<List<PlayerInfo>> getPlayers(String roomCode) async {
+    // Implement logic to fetch players in the room
+    // This is a placeholder; replace with your actual logic
+    return [];
+  }
 
   // re-use the same arrays from HomePage logic (copy of home_page.dart)
   final List<int> _easyQuestions   = [1, 2, 3, 6];
@@ -599,6 +606,233 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     await _askNextQuestion();
   }
 
+  Future<void> _joinPrivateGame(int index, String displayName, String roomCode, {bool isCreator = false}) async {
+    // Mark UI state (local)
+    setState(() {
+      _activeTrackIndex = index;
+      _inPublicRaceView = true;
+      _raceStarted = false;
+      _quizSelectedIndices = [];
+      _quizCurrentPos = 0;
+      _quizScore = 0;
+      _currentDistance = 0.0;
+      _pathPoints = [];
+      _cumLengths = [];
+      _totalPathLength = 0.0;
+      _raceAborted = false;
+    });
+    _carController.stop();
+    _carController.reset();
+    _currentRoomCode = roomCode;
+    try {
+      // Create/join room (createRoom calls joinRoom internally)
+      await _collab.createRoom(roomCode, displayName: displayName);
+      if (isCreator) {
+        _roomCreatorId = _collab.localPlayerId; // Only set if creating the room
+      }
+      // Initial presence touch
+      unawaited(_collab.touchPresence(roomCode));
+      // Clean up stale players when joining
+      await _collab.cleanupStalePlayers(roomCode, ttl: const Duration(seconds: 15));
+      // Subscribe to players list
+      _playersSub?.cancel();
+      _playersSub = _collab.playersStream(roomCode).listen((players) {
+        if (!mounted) return;
+        // Merge the incoming players with the current _playersInRoom to preserve score/errors
+        setState(() {
+          _playersInRoom = players.map((newPlayer) {
+            final existingPlayer = _playersInRoom.firstWhere(
+              (p) => p.id == newPlayer.id,
+              orElse: () => newPlayer,
+            );
+            return PlayerInfo(
+              id: newPlayer.id,
+              displayName: newPlayer.displayName,
+              lastSeen: newPlayer.lastSeen,
+              score: existingPlayer.score,
+              errors: existingPlayer.errors,
+            );
+          }).toList();
+        });
+      });
+      // Listen for score/error updates via messages
+      _messagesSub = _collab.messagesStream(_currentRoomCode!).listen((messages) {
+        for (final msg in messages) {
+          if (msg.payload['type'] == 'score_update') {
+            setState(() {
+              _playersInRoom = _playersInRoom.map((p) {
+                if (p.id == msg.payload['playerId']) {
+                  return PlayerInfo(
+                    id: p.id,
+                    displayName: p.displayName,
+                    lastSeen: p.lastSeen,
+                    score: msg.payload['score'],
+                    errors: p.errors,
+                  );
+                }
+                return p;
+              }).toList();
+            });
+          } else if (msg.payload['type'] == 'error_update') {
+            setState(() {
+              _playersInRoom = _playersInRoom.map((p) {
+                if (p.id == msg.payload['playerId']) {
+                  return PlayerInfo(
+                    id: p.id,
+                    displayName: p.displayName,
+                    lastSeen: p.lastSeen,
+                    score: p.score,
+                    errors: msg.payload['errors'],
+                  );
+                }
+                return p;
+              }).toList();
+            });
+          } else if (msg.payload['type'] == 'start_race') {
+            // Start the race for all players when the message is received
+            if (!_raceStarted) {
+              debugPrint('Received start_race message, starting race!');
+              _startQuizRace();
+            }
+          }
+        }
+      });
+      // Periodic presence update
+      _presenceTimer?.cancel();
+      _presenceTimer = Timer.periodic(const Duration(seconds: 8), (_) {
+        if (_currentRoomCode != null) {
+          _collab.touchPresence(_currentRoomCode!);
+        }
+      });
+    } catch (e) {
+      debugPrint('Failed to join/create room $roomCode: $e');
+      // Tidy up and give feedback
+      _playersSub?.cancel();
+      _presenceTimer?.cancel();
+      _playersInRoom = [];
+      _currentRoomCode = null;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Unable to join private room: $e')),
+        );
+      }
+    }
+  }
+
+  void _showPrivateJoinDialog(int index, String title) {
+    // Default name: username + random 3-digit number
+    _nameController.text = 'Player${Random().nextInt(900) + 100}';
+    final questionsPerTrack = {0: 5, 1: 9, 2: 12, 3: 16, 4: 20};
+    final qCount = questionsPerTrack[_safeIndex(index)] ?? 12;
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        final roomCodeController = TextEditingController();
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              title: Text(title),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "You're about to enter a private multiplayer game.\n\n"
+                      "You will need to answer $qCount questions correctly to complete the lap.\n\n"
+                      "Choose your player name:",
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _nameController,
+                      decoration: InputDecoration(
+                        hintText: 'Enter your name',
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    // Create Room Button
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                      ),
+                      // Inside the "Create Room" button's onPressed
+                      onPressed: () async {
+                        // Generate a simplified room code from car models
+                        final carModels = carData.map((car) => car['model']!).toList()..shuffle();
+                        String roomCode = carModels.isNotEmpty ? carModels.first : 'room${Random().nextInt(900) + 100}';
+                        // Simplify room code: first word, lowercase, alphanumeric only
+                        roomCode = roomCode.split(' ').first.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+                        // Close the current dialog
+                        Navigator.of(context).pop();
+                        // Join the created room
+                        final playerName = _nameController.text.trim().isEmpty
+                            ? 'Player${Random().nextInt(900) + 100}'
+                            : _nameController.text.trim();
+                        debugPrint('Creating/joining private room: $roomCode as $playerName');
+                        FocusScope.of(context).unfocus();
+                        // Join the room as creator
+                        _joinPrivateGame(index, playerName, roomCode, isCreator: true);
+                      },
+                      child: const Text('Create Room'),
+                    ),
+                    const SizedBox(height: 8),
+                    // Join Room Section
+                    TextField(
+                      controller: roomCodeController,
+                      decoration: InputDecoration(
+                        hintText: 'Enter room code',
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actionsPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red,
+                  ),
+                  // Inside the "Join Room" button's onPressed
+                  onPressed: () {
+                    final playerName = _nameController.text.trim().isEmpty
+                        ? 'Player${Random().nextInt(900) + 100}'
+                        : _nameController.text.trim();
+                    final roomCode = roomCodeController.text.trim();
+                    if (roomCode.isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Please enter a room code.')),
+                      );
+                      return;
+                    }
+                    debugPrint('Joining private room: $roomCode as $playerName');
+                    FocusScope.of(context).unfocus();
+                    Navigator.of(context).pop();
+                    // Join the room as non-creator
+                    _joinPrivateGame(index, playerName, roomCode, isCreator: false);
+                  },
+                  child: const Text('Join Room'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   Future<void> _askNextQuestion() async {
     if (!mounted) return;
 
@@ -764,7 +998,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     return Scaffold(
       body: Column(
         children: [
-          // show selector only when NOT in the public race view
+          // Show selector only when NOT in the race view
           if (!_inPublicRaceView) ...[
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 12.0, horizontal: 20),
@@ -778,13 +1012,12 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
             ),
             const Divider(thickness: 0.5),
           ],
-
-          // ===== Content Zone: tracks grid or public race view =====
+          // ===== Content Zone: tracks grid or race view =====
           Expanded(
             child: AnimatedSwitcher(
               duration: const Duration(milliseconds: 250),
               child: _inPublicRaceView
-                  ? _buildPublicRaceView()
+                  ? _buildRaceView()
                   : _buildTracksGrid(isPrivate: !isPublicMode),
             ),
           ),
@@ -866,8 +1099,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
   // ===== Grid of 5 track buttons (shared for Public & Private) =====
   Widget _buildTracksGrid({required bool isPrivate}) {
-    final titles = ['Monza', 'Monaco', 'Suzuka', 'Spa', 'Silverstone'];
-
+    final titles = ['Monza', 'Monaco', 'Suzuka', 'Spa', 'Silverstone', 'Random'];
     return GridView.count(
       key: ValueKey(isPrivate ? 'privateTracks' : 'publicTracks'),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -875,10 +1107,16 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       mainAxisSpacing: 12,
       crossAxisSpacing: 12,
       childAspectRatio: 1.05,
-      children: List.generate(5, (i) {
+      children: List.generate(6, (i) {
         return _buildTrackButton(i, titles[i], isPrivate: isPrivate);
       }),
     );
+  }
+
+  Future<int?> _findRoomWithWaitingPlayers() async {
+    // Since we can't reliably check all rooms, we'll just return null
+    // and let the caller randomly select a room.
+    return null;
   }
 
   void _showPublicJoinDialog(int index, String title) {
@@ -958,47 +1196,64 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     );
   }
 
-  // ===== Single track button (image background + name) =====
   Widget _buildTrackButton(int index, String title, {required bool isPrivate}) {
     return GestureDetector(
-      onTap: () {
-        if (isPrivate) {
-          // private behaviour (open code dialog / create private room)
-          debugPrint('Private track tapped: $title (index $index)');
+      onTap: () async {
+        if (index == 5) {
+          // Random button logic: pick a random track (0..4)
+          final roomWithPlayers = await _findRoomWithWaitingPlayers();
+          final randomIndex = roomWithPlayers ?? Random().nextInt(5);
+          final baseTitles = ['Monza', 'Monaco', 'Suzuka', 'Spa', 'Silverstone'];
+          final randomTitle = baseTitles[randomIndex];
+
+          if (isPrivate) {
+            // <-- FIX: open private join dialog for private mode
+            debugPrint('Private random track tapped: $randomIndex');
+            _showPrivateJoinDialog(randomIndex, randomTitle);
+          } else {
+            // PUBLIC: show the confirmation popup for the selected track
+            _showPublicJoinDialog(randomIndex, randomTitle);
+          }
         } else {
-          // PUBLIC: show the confirmation popup before joining
-          _showPublicJoinDialog(index, title);
+          if (isPrivate) {
+            // PRIVATE: show the private join dialog
+            _showPrivateJoinDialog(index, title);
+          } else {
+            // PUBLIC: show the confirmation popup before joining
+            _showPublicJoinDialog(index, title);
+          }
         }
       },
       child: ClipRRect(
         borderRadius: BorderRadius.circular(12),
         child: Container(
           decoration: BoxDecoration(
-            image: DecorationImage(
-              image: AssetImage('assets/home/RaceTrack$index.png'),
-              fit: BoxFit.cover,
-            ),
+            color: index == 5 ? Color(0xFF3D0000) : null, // No image for Random button
+            image: index != 5
+                ? DecorationImage(
+                    image: AssetImage('assets/home/RaceTrack$index.png'),
+                    fit: BoxFit.cover,
+                  )
+                : null,
           ),
           child: Stack(
             children: [
-              // subtle bottom gradient for text readability
-              Positioned.fill(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        Colors.transparent,
-                        Colors.black,
-                      ],
-                      stops: const [0.5, 1.0],
+              if (index != 5)
+                Positioned.fill(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.transparent,
+                          Colors.black,
+                        ],
+                        stops: const [0.5, 1.0],
+                      ),
                     ),
                   ),
                 ),
-              ),
-
-              // Track name centered at bottom
               Positioned(
                 left: 8,
                 right: 8,
@@ -1250,13 +1505,12 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   }
 
   // ===== Public Race View: image fills left->right, leave bottom reserved area
-  Widget _buildPublicRaceView() {
+  Widget _buildRaceView() {
     final idx = _safeIndex(_activeTrackIndex);
-
     return Column(
       key: ValueKey('publicRaceView_$idx'),
       children: [
-        // Use Stack so we can overlay the Leave and Start button on the image and animate a car
+        // Use Stack so we can overlay the room code
         Expanded(
           child: Stack(
             children: [
@@ -1268,7 +1522,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                   width: double.infinity,
                 ),
               ),
-
               Positioned.fill(
                 child: LayoutBuilder(
                   builder: (context, constraints) {
@@ -1333,8 +1586,32 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                   },
                 ),
               ),
-
-              // Top-left small "Leave" button (text) - small and constrained
+              if (!_raceStarted && _playersInRoom.isNotEmpty && _roomCreatorId == _collab.localPlayerId)
+                Positioned(
+                  bottom: 120,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                      ),
+                      onPressed: () async {
+                        debugPrint('Room creator started the race!');
+                        await _collab.sendMessage(_currentRoomCode!, {
+                          'type': 'start_race',
+                        });
+                        await _startQuizRace();
+                      },
+                      child: const Text(
+                        'Start Race',
+                        style: TextStyle(color: Colors.white, fontSize: 16),
+                      ),
+                    ),
+                  ),
+                ),
+              // Top-left small "Leave" button
               Positioned(
                 top: 12,
                 left: 12,
@@ -1351,7 +1628,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                       ),
                       onPressed: () async {
                         _carController.stop();
-                        // leave collab room and cleanup
                         await _leaveCurrentRoom();
                         if (!mounted) return;
                         setState(() {
@@ -1373,25 +1649,23 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                   ),
                 ),
               ),
-
-              // In the Stack of _buildPublicRaceView(), add:
+              // Waiting for players overlay
               if (!_raceStarted && _playersInRoom.length < 2)
                 Positioned.fill(
                   child: Center(
                     child: Container(
-                      padding: EdgeInsets.all(12),
+                      padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         color: Colors.black54,
                         borderRadius: BorderRadius.circular(8),
                       ),
-                      child: Text(
+                      child: const Text(
                         'Waiting for another player...',
                         style: TextStyle(color: Colors.white, fontSize: 16),
                       ),
                     ),
                   ),
                 ),
-
               if (_waitingForNextQuestion)
                 Positioned(
                   top: 12,
@@ -1421,19 +1695,60 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                     ),
                   ),
                 ),
+                // Room code overlay (only for private rooms)
+                if (_currentRoomCode != null && !_raceStarted && !isPublicMode)
+                  Center(
+                    child: Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.black87,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text(
+                            'Room Code:',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            _currentRoomCode!,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 24,
+                              fontWeight: FontWeight.bold,
+                              letterSpacing: 2,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Share this code with friends!',
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
             ],
           ),
         ),
         // Bottom reserved area for other players' stats
         Container(
-          height: 120, // Adjusted height
+          height: 120,
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           color: Theme.of(context).scaffoldBackgroundColor,
-          child: SingleChildScrollView( // Allow scrolling if content overflows
+          child: SingleChildScrollView(
             child: Column(
               children: [
-                // Local user line
                 if (_playersInRoom.isNotEmpty)
                   _buildPlayerStatLine(
                     player: _playersInRoom.firstWhere(
@@ -1443,7 +1758,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                     isLocal: true,
                   ),
                 const SizedBox(height: 8),
-                // Other user line
                 if (_playersInRoom.length >= 2)
                   _buildPlayerStatLine(
                     player: _playersInRoom.firstWhere(
@@ -1452,23 +1766,23 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                     ),
                     isLocal: false,
                   ),
-                if (_playersInRoom.isEmpty || _playersInRoom.length < 2)
-                  Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        _playersInRoom.isEmpty
-                            ? 'Waiting for players to join this track...'
-                            : 'Waiting for one more player to start the game...',
-                        style: TextStyle(fontSize: 14, color: Colors.grey[700]),
+                if (!_raceStarted && _playersInRoom.length >= 2)
+                  Positioned.fill(
+                    child: Center(
+                      child: Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.black54,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          _roomCreatorId == _collab.localPlayerId
+                              ? 'Press "Start Race" to begin!'
+                              : 'Waiting for the room creator to start the race...',
+                          style: const TextStyle(color: Colors.white, fontSize: 16),
+                        ),
                       ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'Share this device with friends — they will join the same track automatically.',
-                        style: TextStyle(fontSize: 12, color: Colors.grey[500]),
-                      ),
-                    ],
+                    ),
                   ),
               ],
             ),
