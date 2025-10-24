@@ -1,7 +1,7 @@
 // --- add/replace these imports at the top of the file ---
 import 'dart:async';
 import 'dart:math';
-
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'package:flutter/services.dart' show rootBundle;
@@ -140,6 +140,12 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   final List<int> _easyQuestions   = [1, 2, 3, 6];
   final List<int> _mediumQuestions = [4, 5, 11, 12];
   final List<int> _hardQuestions   = [7, 8, 9, 10];
+  Timer? _publicRoomsTimer;
+  // Subscriptions for public-track presence + messages
+  final Map<int, StreamSubscription<List<PlayerInfo>>> _publicPlayersSubs = {};
+  final Map<int, StreamSubscription<List<CollabMessage>>> _publicMessagesSubs = {};
+  final Map<int, bool> _publicRoomHasWaiting = { for (var i = 0; i <= 4; i++) i: false };
+  final Map<int, bool> _publicRoomRunning = { for (var i = 0; i <= 4; i++) i: false };
 
   // helper to create fileBase (same behavior as HomePage)
   String _formatFileName(String brand, String model) {
@@ -157,6 +163,112 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       _raceStarted = true;
     });
     _carController.repeat();
+  }
+
+  void _subscribePublicTracks() {
+    // cancel existing first (safe)
+    _unsubscribePublicTracks();
+
+    for (int i = 0; i <= 4; i++) {
+      final roomCode = 'TRACK_${i}';
+
+      // players stream subscription
+      try {
+        _publicPlayersSubs[i] = _collab.playersStream(roomCode).listen(
+          (players) {
+            if (!mounted) return;
+
+            // If the room has no players, clear running flag (room finished / cleaned up)
+            if (players.isEmpty) {
+              if (_publicRoomRunning[i] != false || _publicRoomHasWaiting[i] != false) {
+                setState(() {
+                  _publicRoomRunning[i] = false;
+                  _publicRoomHasWaiting[i] = false;
+                });
+              }
+              return;
+            }
+
+            // waiting means exactly one player AND the room is not currently running
+            final bool waitingNow = (players.length == 1) && (_publicRoomRunning[i] == false);
+
+            if (_publicRoomHasWaiting[i] != waitingNow) {
+              setState(() {
+                _publicRoomHasWaiting[i] = waitingNow;
+              });
+            }
+
+            // if players >= 2 then the room is running (race started by someone) — but
+            // prefer to rely on explicit start_race message; this is a safe fallback.
+            if (players.length >= 2 && _publicRoomRunning[i] != true) {
+              setState(() {
+                _publicRoomRunning[i] = true;
+                _publicRoomHasWaiting[i] = false;
+              });
+            }
+          },
+          onError: (err) {
+            debugPrint('Error in public playersStream($roomCode): $err');
+            if (mounted && _publicRoomHasWaiting[i] != false) {
+              setState(() => _publicRoomHasWaiting[i] = false);
+            }
+          },
+          cancelOnError: false,
+        );
+      } catch (e) {
+        debugPrint('Failed to subscribe to playersStream for $roomCode: $e');
+        if (mounted && _publicRoomHasWaiting[i] != false) {
+          setState(() => _publicRoomHasWaiting[i] = false);
+        }
+      }
+
+      // messages stream subscription (listen for start_race / end_race)
+      try {
+        _publicMessagesSubs[i] = _collab.messagesStream(roomCode).listen(
+          (messages) {
+            if (!mounted) return;
+            for (final msg in messages) {
+              final t = msg.payload['type'];
+              if (t == 'start_race') {
+                // mark running; clear waiting badge
+                if (_publicRoomRunning[i] != true || _publicRoomHasWaiting[i] != false) {
+                  setState(() {
+                    _publicRoomRunning[i] = true;
+                    _publicRoomHasWaiting[i] = false;
+                  });
+                }
+              } else if (t == 'end_race') {
+                // backend explicitly ended race — clear running flag; playersStream will update waiting
+                if (_publicRoomRunning[i] != false) {
+                  setState(() {
+                    _publicRoomRunning[i] = false;
+                  });
+                }
+              }
+            }
+          },
+          onError: (err) {
+            debugPrint('Error in public messagesStream($roomCode): $err');
+            // don't change running flag on message errors
+          },
+          cancelOnError: false,
+        );
+      } catch (e) {
+        debugPrint('Failed to subscribe to messagesStream for $roomCode: $e');
+      }
+    }
+  }
+
+  void _unsubscribePublicTracks() {
+    for (final sub in _publicPlayersSubs.values) {
+      try { sub.cancel(); } catch (_) {}
+    }
+    _publicPlayersSubs.clear();
+
+    for (final sub in _publicMessagesSubs.values) {
+      try { sub.cancel(); } catch (_) {}
+    }
+    _publicMessagesSubs.clear();
   }
 
   // --- Car data used by the questions (same CSV used in home_page.dart) ---
@@ -178,7 +290,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     12: _handleQuestion12_ModelNameToBrand,
   };
 
-  // helper to present a question widget and return whether it was correct
   Future<bool> _showQuestionWidget(Widget content) async {
     final res = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
@@ -186,8 +297,13 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
           content: content,
           onLeave: () {
             // Called when user chooses Leave from the question AppBar.
-            // Set abort flag so the quiz loop stops, stop animation and reset race view.
+            // Stop animation, tell backend to remove/reset our presence/score, and reset UI.
             try { _carController.stop(); } catch (_) {}
+
+            // Best-effort notify server and remove presence/score when leaving from the question.
+            // Fire-and-forget; we don't await because this callback must remain synchronous.
+            _leaveCurrentRoom();
+
             if (!mounted) return;
             setState(() {
               _raceAborted = true;
@@ -201,6 +317,8 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
               _pathPoints = [];
               _cumLengths = [];
               _totalPathLength = 0.0;
+              _waitingForNextQuestion = false;
+              _roomCreatorId = null;
             });
           },
         ),
@@ -243,6 +361,29 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     while (out.length < count) out.add(exclude ?? '');
     out.shuffle(rng);
     return out;
+  }
+
+  // add to class fields
+  final Map<int, double> _trackAspect = {}; // cache width/height ratio (width/height) per track
+
+  Future<void> _ensureTrackAspect(int trackIdx) async {
+    if (_trackAspect.containsKey(trackIdx)) return;
+    try {
+      final data = await rootBundle.load('assets/home/RaceTrack$trackIdx.png');
+      final bytes = data.buffer.asUint8List();
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      final img = frame.image;
+      if (img.height > 0) {
+        _trackAspect[trackIdx] = img.width / img.height;
+      } else {
+        _trackAspect[trackIdx] = 1.8; // fallback
+      }
+    } catch (e) {
+      // fallback aspect ratio (tweak if you know exact ratio)
+      _trackAspect[trackIdx] = 1.8;
+      debugPrint('Failed to decode asset aspect for track $trackIdx: $e');
+    }
   }
 
   // pick N distinct car entries (full maps) including one correct entry
@@ -590,7 +731,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     if (_totalPathLength <= _eps) {
       final W = MediaQuery.of(context).size.width;
       final H = max(100.0, MediaQuery.of(context).size.height - 120.0);
-      _preparePath(W, H, _safeIndex(_activeTrackIndex));
+      await _preparePath(W, H, _safeIndex(_activeTrackIndex));
     }
 
     _stepDistance = (_totalPathLength > 0 ? _totalPathLength / _quizSelectedIndices.length : 0.0);
@@ -976,9 +1117,13 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       3: _spaNorm,
       4: _silverstoneNorm,
     };
-  
+
     // load CSV now for quiz questions (non-blocking)
     _loadCarData();
+
+    // Subscribe to public track presence streams so the track buttons update live.
+    // We always subscribe so the UI reflects other players even if the user hasn't joined.
+    _subscribePublicTracks();
   }
 
   @override
@@ -990,6 +1135,10 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     try { _playersSub?.cancel(); } catch (_) {}
     try { _messagesSub?.cancel(); } catch (_) {}
     _presenceTimer?.cancel();
+
+    // cancel public track subscriptions (players + messages)
+    _unsubscribePublicTracks();
+
     super.dispose();
   }
 
@@ -1000,29 +1149,28 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         children: [
           // ===== Top block (buttons only) that slides as one piece =====
           ClipRect(
-            child: AnimatedSlide(
-              // Offset in fraction of the size : (0, -1) moves it up by its own height
-              offset: _inPublicRaceView ? const Offset(0, -1) : Offset.zero,
+            child: AnimatedSize(
               duration: const Duration(milliseconds: 300),
               curve: Curves.easeInOut,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 12.0, horizontal: 20),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min, // so slide uses the effective height
-                  children: [
-                    // Mode buttons row only (promo removed)
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                      children: [
-                        _buildModeButton("Public Room", true),
-                        _buildModeButton("Private Room", false),
-                      ],
+              child: _inPublicRaceView
+                  ? const SizedBox.shrink()
+                  : Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 12.0, horizontal: 20),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              _buildModeButton("Public Room", true),
+                              _buildModeButton("Private Room", false),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          const Divider(thickness: 0.5),
+                        ],
+                      ),
                     ),
-                    const SizedBox(height: 8),
-                    const Divider(thickness: 0.5),
-                  ],
-                ),
-              ),
             ),
           ),
 
@@ -1047,6 +1195,33 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     // le SliverToBoxAdapter avec le promo — plus aucun bloc promo "statique"
     // en dehors de la scroll view.
     return _buildTracksGrid(isPrivate: isPrivate);
+  }
+
+  Future<void> _refreshPublicRoomStatuses() async {
+    try {
+      // check tracks 0..4 (exclude Random button index 5)
+      for (int i = 0; i <= 4; i++) {
+        final roomCode = 'TRACK_${i}';
+        List<PlayerInfo> players = [];
+        try {
+          players = await getPlayers(roomCode);
+        } catch (e) {
+          // fallback: treat as empty on error
+          players = [];
+        }
+        final bool hasWaiting = players.isNotEmpty;
+        // update only when changed to avoid excessive rebuilds
+        if (_publicRoomHasWaiting[i] != hasWaiting) {
+          if (!mounted) return;
+          setState(() {
+            _publicRoomHasWaiting[i] = hasWaiting;
+          });
+        }
+      }
+    } catch (e) {
+      // ignore top-level errors; we poll again later
+      debugPrint('Error refreshing public room statuses: $e');
+    }
   }
 
   Widget _buildComingSoonPromo() {
@@ -1116,12 +1291,19 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     );
   }
 
-  // ---- Mode button (red when selected) ----
   Widget _buildModeButton(String label, bool public) {
     final selected = isPublicMode == public;
 
     return GestureDetector(
-      onTap: () => setState(() => isPublicMode = public),
+      onTap: () {
+        // toggle mode and manage subscriptions
+        setState(() => isPublicMode = public);
+        if (public) {
+          _subscribePublicTracks();
+        } else {
+          _unsubscribePublicTracks();
+        }
+      },
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -1226,13 +1408,19 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     );
   }
 
-  Future<int?> _findRoomWithWaitingPlayers() async {
-    // Since we can't reliably check all rooms, we'll just return null
-    // and let the caller randomly select a room.
+  // Return a roomCode (string) that currently has exactly one waiting player and is NOT running.
+  // Returns null otherwise.
+  Future<String?> _findRoomWithWaitingPlayers(int index) async {
+    if (index < 0 || index > 4) return null;
+    final waiting = _publicRoomHasWaiting[index] == true;
+    final running = _publicRoomRunning[index] == true;
+    if (waiting && !running) {
+      return 'TRACK_${index}';
+    }
     return null;
   }
 
-  void _showPublicJoinDialog(int index, String title) {
+  void _showPublicJoinDialog(int index, String title, {String? roomCodeOverride}) {
     // default name: username + random 3-digit number
     _nameController.text = 'Player${Random().nextInt(900) + 100}';
 
@@ -1262,32 +1450,23 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                 controller: _nameController,
                 decoration: InputDecoration(
                   hintText: 'Enter your name',
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                  ),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                 ),
               ),
             ],
           ),
-          actionsPadding:
-              const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          actionsPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Cancel'),
-            ),
+            TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
             ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red,
-              ),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
               onPressed: () {
                 final playerName = _nameController.text.trim().isEmpty
                     ? 'Player${Random().nextInt(900) + 100}'
                     : _nameController.text.trim();
 
-                debugPrint('Joining as: $playerName');
+                debugPrint('Joining as: $playerName (roomOverride=$roomCodeOverride)');
 
                 // 1) Close keyboard
                 FocusScope.of(context).unfocus();
@@ -1298,7 +1477,8 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                 // 3) Wait a short moment so the keyboard/layout settles, then join.
                 Future.delayed(const Duration(milliseconds: 250), () {
                   if (!mounted) return;
-                  _joinPublicGame(index, playerName);
+                  // Pass the optional override room code to _joinPublicGame
+                  _joinPublicGame(index, playerName, roomCodeOverride: roomCodeOverride);
                 });
               },
               child: const Text('Join'),
@@ -1314,26 +1494,36 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       onTap: () async {
         if (index == 5) {
           // Random button logic: pick a random track (0..4)
-          final roomWithPlayers = await _findRoomWithWaitingPlayers();
-          final randomIndex = roomWithPlayers ?? Random().nextInt(5);
+          final randomIndex = Random().nextInt(5);
           final baseTitles = ['Monza', 'Monaco', 'Suzuka', 'Spa', 'Silverstone'];
           final randomTitle = baseTitles[randomIndex];
 
           if (isPrivate) {
-            // <-- FIX: open private join dialog for private mode
             debugPrint('Private random track tapped: $randomIndex');
             _showPrivateJoinDialog(randomIndex, randomTitle);
           } else {
-            // PUBLIC: show the confirmation popup for the selected track
-            _showPublicJoinDialog(randomIndex, randomTitle);
+            // PUBLIC: try to join an existing waiting room; if none, create new room when joining.
+            // However, if the user is already playing in a room whose code starts with TRACK_{randomIndex},
+            // force creation of a new room instead of joining the active game.
+            String? roomToJoin = await _findRoomWithWaitingPlayers(randomIndex);
+            if (_currentRoomCode != null && _currentRoomCode!.startsWith('TRACK_${randomIndex}')) {
+              // Prevent joining the same running room — create a new room instead
+              roomToJoin = null;
+            }
+            _showPublicJoinDialog(randomIndex, randomTitle, roomCodeOverride: roomToJoin);
           }
         } else {
           if (isPrivate) {
-            // PRIVATE: show the private join dialog
             _showPrivateJoinDialog(index, title);
           } else {
-            // PUBLIC: show the confirmation popup before joining
-            _showPublicJoinDialog(index, title);
+            // PUBLIC: attempt to join existing waiting room for this track,
+            // but if the user is already playing on this track (currentRoomCode startsWith TRACK_index),
+            // force them to create a fresh waiting room instead.
+            String? roomToJoin = await _findRoomWithWaitingPlayers(index);
+            if (_currentRoomCode != null && _currentRoomCode!.startsWith('TRACK_${index}')) {
+              roomToJoin = null;
+            }
+            _showPublicJoinDialog(index, title, roomCodeOverride: roomToJoin);
           }
         }
       },
@@ -1341,7 +1531,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         borderRadius: BorderRadius.circular(12),
         child: Container(
           decoration: BoxDecoration(
-            color: index == 5 ? Color(0xFF3D0000) : null, // No image for Random button
+            color: index == 5 ? const Color(0xFF3D0000) : null,
             image: index != 5
                 ? DecorationImage(
                     image: AssetImage('assets/home/RaceTrack$index.png'),
@@ -1382,6 +1572,26 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                   ),
                 ),
               ),
+
+              // presence dot (public-only and not Random)
+              if (!isPrivate && index != 5)
+                Positioned(
+                  top: 8,
+                  right: 8,
+                  child: Tooltip(
+                    message: (_publicRoomHasWaiting[index] == true) ? 'Player waiting' : 'Empty',
+                    child: Container(
+                      width: 12,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        color: (_publicRoomHasWaiting[index] == true) ? Colors.green : Colors.grey,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white70, width: 1.5),
+                        boxShadow: const [BoxShadow(blurRadius: 2, color: Colors.black26, offset: Offset(0,1))],
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
@@ -1390,7 +1600,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   }
 
   // join a public game for a given track index and display name
-  Future<void> _joinPublicGame(int index, String displayName) async {
+  Future<void> _joinPublicGame(int index, String displayName, {String? roomCodeOverride}) async {
     // mark UI state (local)
     setState(() {
       _activeTrackIndex = index;
@@ -1409,8 +1619,9 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     _carController.stop();
     _carController.reset();
 
-    // make a deterministic room code per track so players choosing same track meet
-    final roomCode = 'TRACK_${index}';
+    // allow an override (used when joining an existing waiting room),
+    // otherwise default to canonical per-track room
+    final roomCode = roomCodeOverride ?? 'TRACK_${index}';
     _currentRoomCode = roomCode;
 
     try {
@@ -1482,6 +1693,12 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                 return p;
               }).toList();
             });
+          } else if (msg.payload['type'] == 'start_race') {
+            // Start the race for all players when the message is received
+            if (!_raceStarted) {
+              debugPrint('Received start_race message, starting race!');
+              _startQuizRace();
+            }
           }
         }
       });
@@ -1510,20 +1727,62 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
   Future<void> _leaveCurrentRoom() async {
     final room = _currentRoomCode;
+    // stop presence updates first
     _presenceTimer?.cancel();
     _presenceTimer = null;
+
     try {
       if (room != null) {
-        await _collab.leaveRoom(room);
+        // try to reset our score/errors on the room so when we come back there's no leftover value
+        try {
+          final localId = _collab.localPlayerId;
+          // best-effort: send score update = 0 and errors = 0
+          await _collab.sendMessage(room, {
+            'type': 'score_update',
+            'playerId': localId,
+            'score': 0,
+          });
+          await _collab.sendMessage(room, {
+            'type': 'error_update',
+            'playerId': localId,
+            'errors': 0,
+          });
+        } catch (e) {
+          debugPrint('Failed to reset local score on server for $room: $e');
+          // continue to leave even if reset failed
+        }
+
+        try {
+          await _collab.leaveRoom(room);
+        } catch (e) {
+          debugPrint('Error calling leaveRoom($room): $e');
+        }
       }
-    } catch (_) {}
+    } catch (_) {
+      // swallow any error to avoid crashing on leave
+    }
+
+    // cancel any subscriptions related to being in a room
     try { await _playersSub?.cancel(); } catch (_) {}
     _playersSub = null;
+    try { await _messagesSub?.cancel(); } catch (_) {}
+    _messagesSub = null;
+
+    // finally clear local UI state
     if (mounted) {
       setState(() {
         _playersInRoom = [];
         _currentRoomCode = null;
-        _raceStarted = false; // Reset race state
+        _raceStarted = false;
+        _quizSelectedIndices = [];
+        _quizCurrentPos = 0;
+        _quizScore = 0;
+        _currentDistance = 0.0;
+        _pathPoints = [];
+        _cumLengths = [];
+        _totalPathLength = 0.0;
+        _waitingForNextQuestion = false;
+        _roomCreatorId = null;
       });
     }
   }
@@ -1536,16 +1795,27 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     return v;
   }
 
-  // Convert normalized track points for a given track index into pixel Offsets,
-  // compute cumulative lengths and total length.
-  void _preparePath(double W, double H, int trackIdx) {
-    // choose normalized list by track index (currently only Monza / idx 0)
+  Future<void> _preparePath(double W, double H, int trackIdx) async {
+    // ensure we know the image aspect
+    await _ensureTrackAspect(trackIdx);
+    final aspect = _trackAspect[trackIdx] ?? 1.8; // width / height
+
+    // For BoxFit.fitWidth + Alignment.topCenter the image will be scaled to fit the width (W)
+    // renderedImageHeight = W / aspect
+    final renderedImageHeight = W / aspect;
+
+    // choose normalized list by track index
     final List<List<double>> norm = _tracksNorm[trackIdx] ?? _monzaNorm;
 
-    // convert to pixel positions
-    _pathPoints = norm.map((p) => Offset(p[0] * W, p[1] * H)).toList();
+    // convert to pixel positions relative to the **rendered image box**.
+    // We align the image at the top (topOffset = 0). If you prefer centered, compute topOffset.
+    final double topOffset = 0.0;
 
-    // ensure path is not degenerate
+    _pathPoints = norm
+        .map((p) => Offset(p[0] * W, topOffset + p[1] * renderedImageHeight))
+        .toList();
+
+    // ensure path has at least 2 points
     if (_pathPoints.length < 2) {
       _cumLengths = [0.0];
       _totalPathLength = 0.0;
@@ -1560,11 +1830,9 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     }
     _totalPathLength = _cumLengths.last;
 
-    // guard
     if (_totalPathLength <= _eps) _totalPathLength = 1.0;
 
     // adjust animation duration so car speed roughly similar across sizes
-    // here 150 px/s chosen as base speed; tweak as desired
     final secs = max(4, (_totalPathLength / 150.0).round());
     _carController.duration = Duration(seconds: secs);
     _carController.reset();
@@ -1631,7 +1899,8 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
               Positioned.fill(
                 child: Image.asset(
                   'assets/home/RaceTrack$idx.png',
-                  fit: BoxFit.cover,
+                  fit: BoxFit.fitWidth,
+                  alignment: Alignment.topCenter,
                   width: double.infinity,
                 ),
               ),
@@ -1641,7 +1910,13 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                     final W = constraints.maxWidth;
                     final H = constraints.maxHeight;
                     final idx = _safeIndex(_activeTrackIndex);
-                    if (_pathPoints.isEmpty) _preparePath(W, H, idx);
+                    if (_pathPoints.isEmpty) {
+                      // schedule async preparation once — this will call setState when done
+                      Future.microtask(() async {
+                        await _preparePath(W, H, idx);
+                        if (mounted) setState(() {});
+                      });
+                    }
                     return AnimatedBuilder(
                       animation: _carController,
                       builder: (context, child) {
