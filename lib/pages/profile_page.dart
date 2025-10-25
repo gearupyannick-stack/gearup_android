@@ -872,68 +872,83 @@ class _ProfilePageState extends State<ProfilePage> {
     Navigator.of(dialogContext).pop(); // close edit dialog
   }
 
+  // Remplacer entièrement la fonction _showEditProfileDialog par ceci :
   void _showEditProfileDialog() {
+    // copies initiales (hors du StatefulBuilder pour qu'elles persistent)
     String u = username;
     if (!_isCarDataLoaded) return;
     String fb = favoriteBrand != 'N/A' && favoriteBrand.isNotEmpty ? favoriteBrand : _brandOptions.first;
     String fm = favoriteModel != 'N/A' && favoriteModel.isNotEmpty ? favoriteModel : _brandToModels[fb]!.first;
 
+    // <- important : localUseGoogleName déclaré ici (outside builder)
+    bool localUseGoogleName = _useGoogleName;
+
+    // controller stable pour l'input username
+    final usernameController = TextEditingController(text: u);
+
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSt) {
-          // Local copies inside dialog
-          bool localUseGoogleName = _useGoogleName;
-
           return AlertDialog(
             title: const Text('Edit Profile'),
             content: SingleChildScrollView(
               child: Column(
                 children: [
-                  // Username field
+                  // Username field (controller stable)
                   TextField(
-                    controller: TextEditingController(text: u),
+                    controller: usernameController,
                     decoration: const InputDecoration(labelText: 'Username'),
                     onChanged: (v) => u = v,
                   ),
                   const SizedBox(height: 12),
 
                   // Favorite Brand dropdown
-                  DropdownButtonFormField<String>(
-                    value: fb,
-                    decoration: const InputDecoration(labelText: 'Favorite Brand'),
-                    items: _brandOptions.map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
-                    onChanged: (v) {
-                      setSt(() {
-                        fb = v!;
-                        fm = _brandToModels[fb]!.first;
-                      });
-                    },
+                  // Remplace l'ancien DropdownButtonFormField Favorite Brand par ceci :
+                  SizedBox(
+                    width: double.infinity,
+                    child: DropdownButtonFormField<String>(
+                      value: fb,
+                      isExpanded: true,
+                      isDense: true,
+                      decoration: const InputDecoration(labelText: 'Favorite Brand'),
+                      items: _brandOptions.map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
+                      onChanged: (v) {
+                        setSt(() {
+                          fb = v!;
+                          fm = _brandToModels[fb]!.first;
+                        });
+                      },
+                    ),
                   ),
-                  const SizedBox(height: 8),
 
-                  // Favorite Model dropdown
-                  DropdownButtonFormField<String>(
-                    value: fm,
-                    decoration: const InputDecoration(labelText: 'Favorite Model'),
-                    items: _brandToModels[fb]!.map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
-                    onChanged: (v) => setSt(() => fm = v!),
+                  // Remplace l'ancien DropdownButtonFormField Favorite Model par ceci :
+                  SizedBox(
+                    width: double.infinity,
+                    child: DropdownButtonFormField<String>(
+                      value: fm,
+                      isExpanded: true,
+                      isDense: true,
+                      decoration: const InputDecoration(labelText: 'Favorite Model'),
+                      items: _brandToModels[fb]!.map((v) => DropdownMenuItem(value: v, child: Text(v))).toList(),
+                      onChanged: (v) => setSt(() => fm = v!),
+                    ),
                   ),
-                  const SizedBox(height: 12),
 
                   // If Google signed in, allow toggling use of Google name/photo
                   if (_googleSignedIn) ...[
                     CheckboxListTile(
                       title: const Text('Use Google name & photo'),
                       value: localUseGoogleName,
-                      onChanged: (val) => setSt(() => localUseGoogleName = val ?? true),
+                      // NOTER : default onChanged -> use val ?? false (ne ré-init à true jamais)
+                      onChanged: (val) => setSt(() => localUseGoogleName = val ?? false),
                     ),
                     const SizedBox(height: 8),
                     Text('Signed in: ${_googleDisplayName ?? _googleEmail ?? 'Google user'}',
                         style: const TextStyle(fontSize: 12, color: Colors.grey)),
                     const SizedBox(height: 8),
 
-                    // Disconnect button for signed-in users (outlined to match previous style)
+                    // Disconnect button for signed-in users
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton(
@@ -947,14 +962,12 @@ class _ProfilePageState extends State<ProfilePage> {
                         child: const Text('Disconnect Google'),
                       ),
                     ),
-                  ]
-                  // If not signed in and user is a guest, show image-only Google sign-in button + disconnect button below
-                  else if (_isGuest) ...[
-                    // Image-only button (no text). Tapping it triggers navigation to sign-in/welcome.
+                  ] else if (_isGuest) ...[
+                    // guest: offer google sign-in button (kept as before)
                     Center(
                       child: Semantics(
                         button: true,
-                        label: 'Sign in with Google', // accessibility only
+                        label: 'Sign in with Google',
                         child: SizedBox(
                           width: 600,
                           height: 56,
@@ -964,8 +977,6 @@ class _ProfilePageState extends State<ProfilePage> {
                             child: InkWell(
                               borderRadius: BorderRadius.circular(8),
                               onTap: () async {
-                                // Start Google sign-in directly (no /welcome route dependency)
-                                // show loader while signing in
                                 showDialog(context: ctx, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
                                 await _startGoogleSignInFlow(dialogContext: ctx);
                               },
@@ -975,53 +986,34 @@ class _ProfilePageState extends State<ProfilePage> {
                       ),
                     ),
                     const SizedBox(height: 12),
-
-                    // Disconnect button under the image-only sign-in button (clears any lingering Google prefs)
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton(
                         style: ElevatedButton.styleFrom(minimumSize: const Size.fromHeight(40)),
                         onPressed: () async {
-                          // Show small progress indicator while signing out/clearing
-                          showDialog(
-                            context: ctx,
-                            barrierDismissible: false,
-                            builder: (_) => const Center(child: CircularProgressIndicator()),
-                          );
-
+                          showDialog(context: ctx, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
                           try {
-                            // Use AuthService signOut (safe)
-                            try {
-                              await AuthService.instance.signOut();
-                            } catch (_) {}
+                            await AuthService.instance.signOut();
+                          } catch (_) {}
+                          final prefs = await SharedPreferences.getInstance();
+                          await prefs.remove('google_signed_in');
+                          await prefs.remove('google_displayName');
+                          await prefs.remove('google_email');
+                          await prefs.remove('google_photoUrl');
+                          await prefs.remove('use_google_name');
 
-                            final prefs = await SharedPreferences.getInstance();
-                            await prefs.remove('google_signed_in');
-                            await prefs.remove('google_displayName');
-                            await prefs.remove('google_email');
-                            await prefs.remove('google_photoUrl');
-                            await prefs.remove('use_google_name');
+                          if (!mounted) return;
+                          setState(() {
+                            _googleSignedIn = false;
+                            _googleDisplayName = null;
+                            _googleEmail = null;
+                            _googlePhotoUrl = null;
+                            _useGoogleName = false;
+                            username = prefs.getString('username') ?? 'unamed_carenthusiast';
+                          });
 
-                            if (!mounted) return;
-                            setState(() {
-                              _googleSignedIn = false;
-                              _googleDisplayName = null;
-                              _googleEmail = null;
-                              _googlePhotoUrl = null;
-                              _useGoogleName = false;
-                              username = prefs.getString('username') ?? 'unamed_carenthusiast';
-                            });
-
-                            Navigator.of(ctx).pop(); // close progress
-                            Navigator.of(ctx).pop(); // close edit dialog
-                          } catch (err) {
-                            Navigator.of(ctx).pop(); // close progress
-                            if (mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(content: Text('Could not disconnect Google: $err')),
-                              );
-                            }
-                          }
+                          Navigator.of(ctx).pop(); // close progress
+                          Navigator.of(ctx).pop(); // close edit dialog
                         },
                         child: const Text('Disconnect Google'),
                       ),
@@ -1034,31 +1026,41 @@ class _ProfilePageState extends State<ProfilePage> {
               ElevatedButton(
                 onPressed: () async {
                   final prefs = await SharedPreferences.getInstance();
+
+                  // use the controller text (most reliable)
+                  final newUsername = usernameController.text.trim();
+
                   // Persist choices
-                  await prefs.setString('username', u);
+                  await prefs.setString('username', newUsername);
                   await prefs.setString('favoriteBrand', fb);
                   await prefs.setString('favoriteModel', fm);
                   await prefs.setBool('use_google_name', localUseGoogleName);
 
                   if (!mounted) return;
+
                   setState(() {
-                    // If user wants to use Google name and is signed-in, prefer the Google display name
+                    // update in-memory flags
                     _useGoogleName = localUseGoogleName;
-                    username = (_googleSignedIn && _useGoogleName && _googleDisplayName != null)
+
+                    // If user wants to use Google name and is signed-in, prefer Google display name,
+                    // otherwise keep the freshly typed username (or fallback default)
+                    username = (_googleSignedIn && _useGoogleName && (_googleDisplayName?.isNotEmpty ?? false))
                         ? _googleDisplayName!
-                        : u;
+                        : (newUsername.isEmpty ? 'unamed_carenthusiast' : newUsername);
+
                     favoriteBrand = fb;
                     favoriteModel = fm;
                   });
+
+                  // Close dialog (NE PAS disposer le controller ici)
                   Navigator.of(ctx).pop();
                 },
                 child: const Text('Save'),
               ),
               TextButton(
                 onPressed: () {
-                  try {
-                    AudioFeedback.instance.playEvent(SoundEvent.tap);
-                  } catch (_) {}
+                  try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
+                  // NE PAS disposer le controller ici pour éviter l'error "used after disposed"
                   Navigator.of(ctx).pop();
                 },
                 child: const Text('Cancel'),

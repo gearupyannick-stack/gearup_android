@@ -3,15 +3,16 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'services/premium_service.dart';
 
 // REMOVED: import 'pages/welcome_page.dart';
 import 'pages/home_page.dart';
-import 'pages/training_page.dart';
 import 'pages/library_page.dart';
 import 'pages/profile_page.dart';
 import 'pages/preload_page.dart'; // ✅ first-launch data loader
 import 'pages/welcome_page.dart';
 import 'services/sound_manager.dart';
+import 'pages/training_page.dart';
 
 import 'storage/lives_storage.dart';
 import 'package:tutorial_coach_mark/tutorial_coach_mark.dart';
@@ -172,6 +173,14 @@ class _FirstLaunchGateState extends State<FirstLaunchGate> {
   @override
   void initState() {
     super.initState();
+
+    // Initialise l'état premium depuis SharedPreferences
+    // (charge isPremium et compte quotidien). On refresh l'UI après init.
+    PremiumService.instance.init().then((_) {
+      if (mounted) setState(() {});
+    });
+
+    // garde le comportement existant qui affiche PreloadPage la première fois
     _markNotFirstAndShowPreload();
   }
 

@@ -140,7 +140,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   final List<int> _easyQuestions   = [1, 2, 3, 6];
   final List<int> _mediumQuestions = [4, 5, 11, 12];
   final List<int> _hardQuestions   = [7, 8, 9, 10];
-  Timer? _publicRoomsTimer;
   // Subscriptions for public-track presence + messages
   final Map<int, StreamSubscription<List<PlayerInfo>>> _publicPlayersSubs = {};
   final Map<int, StreamSubscription<List<CollabMessage>>> _publicMessagesSubs = {};
@@ -1189,39 +1188,8 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     );
   }
 
-  // Remplace la fonction _buildTracksWithPromo par celle-ci
   Widget _buildTracksWithPromo({required bool isPrivate}) {
-    // On retourne directement la grille scrollable qui contient déjà
-    // le SliverToBoxAdapter avec le promo — plus aucun bloc promo "statique"
-    // en dehors de la scroll view.
     return _buildTracksGrid(isPrivate: isPrivate);
-  }
-
-  Future<void> _refreshPublicRoomStatuses() async {
-    try {
-      // check tracks 0..4 (exclude Random button index 5)
-      for (int i = 0; i <= 4; i++) {
-        final roomCode = 'TRACK_${i}';
-        List<PlayerInfo> players = [];
-        try {
-          players = await getPlayers(roomCode);
-        } catch (e) {
-          // fallback: treat as empty on error
-          players = [];
-        }
-        final bool hasWaiting = players.isNotEmpty;
-        // update only when changed to avoid excessive rebuilds
-        if (_publicRoomHasWaiting[i] != hasWaiting) {
-          if (!mounted) return;
-          setState(() {
-            _publicRoomHasWaiting[i] = hasWaiting;
-          });
-        }
-      }
-    } catch (e) {
-      // ignore top-level errors; we poll again later
-      debugPrint('Error refreshing public room statuses: $e');
-    }
   }
 
   Widget _buildComingSoonPromo() {
