@@ -1,17 +1,22 @@
-// --- add/replace these imports at the top of the file ---
 import 'dart:async';
 import 'dart:math';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/audio_feedback.dart';
 import '../services/image_service_cache.dart';
 import '../services/collab_wan_service.dart'; // <<-- NEW
 
 class RacePage extends StatefulWidget {
-  const RacePage({Key? key}) : super(key: key);
+  final String? username;
+  
+  const RacePage({
+    Key? key,
+    this.username,
+  }) : super(key: key);
 
   @override
   State<RacePage> createState() => _RacePageState();
@@ -57,6 +62,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
   // signal to abort the current race / quiz (set when user taps Leave inside a question)
   bool _raceAborted = false;
+  bool _handlingEndRace = false;
 
   // New: race / car animation state
   bool _raceStarted = false;
@@ -71,6 +77,9 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   Timer? _presenceTimer;
   bool _waitingForNextQuestion = false;
   StreamSubscription<List<CollabMessage>>? _messagesSub;
+  bool _raceEndedByServer = false;
+  String? _serverWinnerId;
+  String? _serverWinnerName;
 
   // quiz / step-race state
   List<int> _quizSelectedIndices = [];
@@ -126,6 +135,9 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   List<Offset> _pathPoints = [];
   List<double> _cumLengths = []; // cumulative lengths, starts with 0.0
   double _totalPathLength = 0.0;
+  // reentrancy guard to avoid parallel question loops
+  bool _isAskingQuestion = false;
+  DateTime? _roomJoinedAt; // set when we join a room
 
   // small epsilon for numeric stability
   static const double _eps = 1e-6;
@@ -156,12 +168,406 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         .join();
   }
 
-  // small helper to start the car animation
+  Future<void> _showRaceResultDialog(List<PlayerInfo> players, PlayerInfo winner) async {
+    if (!mounted) return;
+
+    // Sort players for presentation (winner first)
+    final displayList = List<PlayerInfo>.from(players);
+    displayList.sort((a, b) {
+      final scoreCmp = b.score.compareTo(a.score);
+      if (scoreCmp != 0) return scoreCmp;
+      return a.errors.compareTo(b.errors);
+    });
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return AlertDialog(
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Race finished!'),
+              const SizedBox(height: 6),
+              Text('Winner: ${winner.displayName}', style: const TextStyle(fontWeight: FontWeight.bold)),
+            ],
+          ),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // header row
+                Row(
+                  children: const [
+                    Expanded(child: Text('Player', style: TextStyle(fontWeight: FontWeight.bold))),
+                    SizedBox(width: 8),
+                    Text('Score', style: TextStyle(fontWeight: FontWeight.bold)),
+                    SizedBox(width: 12),
+                    Text('Err', style: TextStyle(fontWeight: FontWeight.bold)),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Flexible(
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: displayList.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 6),
+                    itemBuilder: (context, i) {
+                      final p = displayList[i];
+                      final isWinner = p.id == winner.id || p.displayName == winner.displayName;
+                      final isLocal = p.id == _collab.localPlayerId || p.displayName == _nameController.text.trim();
+                      return Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: isWinner ? Colors.green[800] : Colors.grey[900],
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                p.displayName.isNotEmpty ? p.displayName : (isLocal ? 'You' : 'Player'),
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: isWinner ? FontWeight.w700 : FontWeight.w600,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text('${p.score}', style: const TextStyle(color: Colors.white)),
+                            const SizedBox(width: 12),
+                            Text('${p.errors}', style: const TextStyle(color: Colors.white)),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('OK'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  PlayerInfo _determineWinner(List<PlayerInfo> players) {
+    if (players.isEmpty) {
+      return PlayerInfo(id: '', displayName: 'No one', lastSeen: DateTime.now(), score: 0, errors: 0);
+    }
+
+    // defensive: make a sorted copy
+    final sorted = List<PlayerInfo>.from(players);
+    sorted.sort((a, b) {
+      // primary: score desc
+      final scoreCmp = b.score.compareTo(a.score);
+      if (scoreCmp != 0) return scoreCmp;
+      // secondary: errors asc
+      final errCmp = a.errors.compareTo(b.errors);
+      if (errCmp != 0) return errCmp;
+      // tertiary: earlier lastSeen wins (smaller DateTime)
+      return a.lastSeen.compareTo(b.lastSeen);
+    });
+
+    return sorted.first;
+  }
+
+  Future<void> _handleServerEndRace(Map<String, dynamic> payload) async {
+    if (!mounted) return;
+    debugPrint('Handling server end_race payload: $payload');
+
+    // If not in race view, ignore.
+    if (!_inPublicRaceView) {
+      debugPrint('Ignoring end_race: not in public race view.');
+      return;
+    }
+
+    // Prevent duplicate handling / re-entry
+    if (_handlingEndRace || _raceEndedByServer) {
+      debugPrint('Already handling end_race or race already marked ended; ignoring.');
+      return;
+    }
+
+    _handlingEndRace = true;
+    // tentatively mark ended; may be cleared if we ignore
+    _raceEndedByServer = true;
+
+    try {
+      final localId = _collab.localPlayerId;
+      final room = _currentRoomCode;
+
+      // Safely extract winner fields from payload
+      final winnerIdRaw = payload['winnerId'];
+      final winnerNameRaw = payload['winnerName'];
+      final String? winnerId = winnerIdRaw == null ? null : winnerIdRaw.toString();
+      final String? winnerName = winnerNameRaw == null ? null : winnerNameRaw.toString();
+      final bool payloadHasWinner = (winnerId != null && winnerId.isNotEmpty) ||
+                                    (winnerName != null && winnerName.isNotEmpty);
+
+      // Snapshot players to avoid concurrent mutation
+      List<PlayerInfo> playersSnapshot = List<PlayerInfo>.from(_playersInRoom);
+
+      // Ensure local player present and up-to-date in snapshot (use current _quizScore)
+      final localName = _nameController.text.trim().isEmpty ? 'You' : _nameController.text.trim();
+      final idxLocal = playersSnapshot.indexWhere((p) => p.id == localId || p.displayName == localName);
+      if (idxLocal >= 0) {
+        final p = playersSnapshot[idxLocal];
+        playersSnapshot[idxLocal] = PlayerInfo(
+          id: p.id,
+          displayName: p.displayName.isNotEmpty ? p.displayName : localName,
+          lastSeen: p.lastSeen,
+          score: _quizScore,
+          errors: p.errors,
+        );
+      } else {
+        playersSnapshot.add(PlayerInfo(
+          id: localId,
+          displayName: localName,
+          lastSeen: DateTime.now(),
+          score: _quizScore,
+          errors: 0,
+        ));
+      }
+
+      // Determine winner: prefer server-provided id/name, fallback to local logic
+      PlayerInfo winner;
+      if (payloadHasWinner && winnerId != null && winnerId.isNotEmpty) {
+        winner = playersSnapshot.firstWhere(
+          (p) => p.id == winnerId,
+          orElse: () => PlayerInfo(
+            id: winnerId,
+            displayName: (winnerName != null && winnerName.isNotEmpty) ? winnerName : 'Winner',
+            lastSeen: DateTime.now(),
+            score: 0,
+            errors: 0,
+          ),
+        );
+      } else if (payloadHasWinner && winnerName != null && winnerName.isNotEmpty) {
+        winner = playersSnapshot.firstWhere(
+          (p) => p.displayName == winnerName,
+          orElse: () => PlayerInfo(
+            id: '',
+            displayName: winnerName,
+            lastSeen: DateTime.now(),
+            score: 0,
+            errors: 0,
+          ),
+        );
+      } else {
+        winner = _determineWinner(playersSnapshot);
+      }
+
+      // total slots expected for this race
+      final totalSlots = _quizSelectedIndices.length;
+      final bool localCompleted = (totalSlots > 0) && (_quizScore >= totalSlots);
+
+      // CRITICAL: If the winner selected is the local player but the local player has NOT actually
+      // completed the required number of correct answers, ignore this end_race (do NOT show "You won").
+      if (winner.id == localId && !localCompleted) {
+        debugPrint('Ignoring end_race: decided winner is local but local has not completed quiz (score=$_quizScore / required=$totalSlots).');
+        // clear the temporary flags so future end_race messages can be processed normally
+        _handlingEndRace = false;
+        _raceEndedByServer = false;
+        return;
+      }
+
+      // If local player lost, show small "You lost" SnackBar (non-blocking).
+      if (localId != winner.id) {
+        try {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('You lost — Winner: ${winner.displayName}'),
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          }
+        } catch (_) {
+          // ignore snackbar errors
+        }
+      }
+
+      // Show the full results dialog (blocking until dismissed).
+      try {
+        await _showRaceResultDialog(playersSnapshot, winner);
+      } catch (e) {
+        debugPrint('Error showing race result dialog: $e');
+      }
+
+      // best-effort ack to server that we handled the end
+      if (room != null) {
+        try {
+          await _collab.sendMessage(room, {
+            'type': 'ack_end_race',
+            'playerId': localId,
+          });
+        } catch (e) {
+          debugPrint('Failed to send ack_end_race: $e');
+        }
+      }
+
+      // Now leave and cleanup UI — this will cancel subscriptions.
+      try {
+        await _leaveCurrentRoom();
+      } catch (e) {
+        debugPrint('Error leaving room after end_race: $e');
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _inPublicRaceView = false;
+        _activeTrackIndex = null;
+        _raceStarted = false;
+        _quizSelectedIndices = [];
+        _quizCurrentPos = 0;
+        _quizScore = 0;
+        _currentDistance = 0.0;
+        _waitingForNextQuestion = false;
+        _roomCreatorId = null;
+
+        // reset server-end flag so a new game later can run normally
+        _raceEndedByServer = false;
+      });
+    } finally {
+      // Ensure reentrancy guard cleared if we didn't already return.
+      _handlingEndRace = false;
+    }
+  }
+
+  Future<void> _onRaceFinished() async {
+    if (!mounted) return;
+
+    debugPrint('Race finished locally — running finish flow.');
+
+    // ensure the car isn't repeating
+    try { _carController.stop(); } catch (_) {}
+
+    // If server already declared the race ended, don't re-run finish logic.
+    if (_raceEndedByServer) {
+      debugPrint('Race already ended by server; aborting local finish flow.');
+      return;
+    }
+
+    // send local final score to server (best-effort)
+    final room = _currentRoomCode;
+    final localId = _collab.localPlayerId;
+    if (room != null) {
+      try {
+        await _collab.sendMessage(room, {
+          'type': 'score_update',
+          'playerId': localId,
+          'score': _quizScore,
+        });
+      } catch (e) {
+        debugPrint('Failed to send final score update: $e');
+      }
+    }
+
+    // give server/opponent a short moment to push final scores
+    await Future.delayed(const Duration(milliseconds: 700));
+
+    // snapshot players (copy to avoid concurrent mutation)
+    List<PlayerInfo> playersSnapshot = List<PlayerInfo>.from(_playersInRoom);
+
+    // ensure local player present and up-to-date
+    final localName = _nameController.text.trim().isEmpty ? 'You' : _nameController.text.trim();
+    final idxLocal = playersSnapshot.indexWhere((p) => p.id == localId || p.displayName == localName);
+    if (idxLocal >= 0) {
+      final p = playersSnapshot[idxLocal];
+      playersSnapshot[idxLocal] = PlayerInfo(
+        id: p.id,
+        displayName: p.displayName.isNotEmpty ? p.displayName : localName,
+        lastSeen: p.lastSeen,
+        score: _quizScore,
+        errors: p.errors,
+      );
+    } else {
+      playersSnapshot.add(PlayerInfo(
+        id: localId,
+        displayName: localName,
+        lastSeen: DateTime.now(),
+        score: _quizScore,
+        errors: 0,
+      ));
+    }
+
+    // determine winner (local decision only if server hasn't already declared one)
+    final winner = _determineWinner(playersSnapshot);
+
+    // mark that *we* are ending the race and inform others — include winnerName so receivers can show it
+    _raceEndedByServer = true;
+    _serverWinnerId = winner.id;
+    _serverWinnerName = winner.displayName;
+
+    if (room != null) {
+      try {
+        await _collab.sendMessage(room, {
+          'type': 'end_race',
+          'winnerId': winner.id,
+          'winnerName': winner.displayName,
+        });
+      } catch (e) {
+        debugPrint('Failed to send end_race message: $e');
+      }
+    }
+
+    // show results dialog (blocking until user dismisses)
+    await _showRaceResultDialog(playersSnapshot, winner);
+
+    // cleanup & leave room, return to track grid
+    await _leaveCurrentRoom();
+
+    if (!mounted) return;
+    setState(() {
+      _inPublicRaceView = false;
+      _activeTrackIndex = null;
+    });
+  }
+
+  // --- replace existing _startCar() with this ---
   void _startCar() {
+    if (!mounted) return;
+
     setState(() {
       _raceStarted = true;
     });
-    _carController.repeat();
+
+    // stop any ongoing action first
+    try { _carController.stop(); } catch (_) {}
+
+    final cur = _carController.value.clamp(0.0, 1.0);
+    final remaining = (1.0 - cur).clamp(0.0, 1.0);
+
+    // if already at or extremely close to the end, trigger finish immediately
+    if (remaining <= 1e-3) {
+      // ensure visual at end
+      try { _carController.value = 1.0; } catch (_) {}
+      // call finish handler on next microtask so UI settles
+      Future.microtask(() => _onRaceFinished());
+      return;
+    }
+
+    final baseDuration = _carController.duration ?? const Duration(seconds: 6);
+    final ms = max(300, (baseDuration.inMilliseconds * remaining).round());
+    final animDuration = Duration(milliseconds: ms);
+
+    // animate the rest of the lap once, then run finish handler
+    _carController
+        .animateTo(1.0, duration: animDuration, curve: Curves.easeInOut)
+        .then((_) {
+      if (mounted) _onRaceFinished();
+    }).catchError((err) {
+      debugPrint('Car animation to finish failed: $err');
+      if (mounted) _onRaceFinished();
+    });
   }
 
   void _subscribePublicTracks() {
@@ -256,6 +662,33 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         debugPrint('Failed to subscribe to messagesStream for $roomCode: $e');
       }
     }
+  }
+
+  /// Fetch the profile username from SharedPreferences (tries several common keys).
+  /// Returns an empty string if not found or if value equals the default placeholder.
+  Future<String> _fetchProfileUsername() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      // try several plausible keys used across the app
+      final candidates = <String?>[
+        prefs.getString('username'),
+        prefs.getString('displayName'),
+        prefs.getString('profile_username'),
+        prefs.getString('profile_displayName'),
+        prefs.getString('name'),
+      ];
+      for (final c in candidates) {
+        if (c == null) continue;
+        final v = c.trim();
+        if (v.isEmpty) continue;
+        // don't treat the placeholder as a real name (case-insensitive)
+        if (v.toLowerCase() == 'unamed_carenthusiast') continue;
+        return v;
+      }
+    } catch (e) {
+      debugPrint('Failed to read profile username: $e');
+    }
+    return '';
   }
 
   void _unsubscribePublicTracks() {
@@ -795,48 +1228,112 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
           }).toList();
         });
       });
-      // Listen for score/error updates via messages
-      _messagesSub = _collab.messagesStream(_currentRoomCode!).listen((messages) {
-        for (final msg in messages) {
-          if (msg.payload['type'] == 'score_update') {
-            setState(() {
-              _playersInRoom = _playersInRoom.map((p) {
-                if (p.id == msg.payload['playerId']) {
-                  return PlayerInfo(
-                    id: p.id,
-                    displayName: p.displayName,
-                    lastSeen: p.lastSeen,
-                    score: msg.payload['score'],
-                    errors: p.errors,
-                  );
-                }
-                return p;
-              }).toList();
-            });
-          } else if (msg.payload['type'] == 'error_update') {
-            setState(() {
-              _playersInRoom = _playersInRoom.map((p) {
-                if (p.id == msg.payload['playerId']) {
-                  return PlayerInfo(
-                    id: p.id,
-                    displayName: p.displayName,
-                    lastSeen: p.lastSeen,
-                    score: p.score,
-                    errors: msg.payload['errors'],
-                  );
-                }
-                return p;
-              }).toList();
-            });
-          } else if (msg.payload['type'] == 'start_race') {
-            // Start the race for all players when the message is received
-            if (!_raceStarted) {
-              debugPrint('Received start_race message, starting race!');
-              _startQuizRace();
+
+      // Listen for score/error updates + start_race + end_race
+      _messagesSub = _collab.messagesStream(_currentRoomCode!).listen(
+        (messages) {
+          for (final msg in messages) {
+            final type = msg.payload['type'];
+            if (type == 'score_update') {
+              setState(() {
+                _playersInRoom = _playersInRoom.map((p) {
+                  if (p.id == msg.payload['playerId']) {
+                    return PlayerInfo(
+                      id: p.id,
+                      displayName: p.displayName,
+                      lastSeen: p.lastSeen,
+                      score: msg.payload['score'],
+                      errors: p.errors,
+                    );
+                  }
+                  return p;
+                }).toList();
+              });
+            } else if (type == 'error_update') {
+              setState(() {
+                _playersInRoom = _playersInRoom.map((p) {
+                  if (p.id == msg.payload['playerId']) {
+                    return PlayerInfo(
+                      id: p.id,
+                      displayName: p.displayName,
+                      lastSeen: p.lastSeen,
+                      score: p.score,
+                      errors: msg.payload['errors'],
+                    );
+                  }
+                  return p;
+                }).toList();
+              });
+            } else if (type == 'start_race') {
+              // Start the race for all players when the message is received
+              if (!_raceStarted) {
+                debugPrint('Received start_race message, starting race!');
+                _startQuizRace();
+              }
+            } else if (type == 'end_race') {
+              // If we're not showing the race UI, ignore stale end_race messages.
+              if (!_inPublicRaceView) {
+                debugPrint('Received end_race but not in public race view — ignoring.');
+                continue;
+              }
+
+              // Extract payload copy
+              Map<String, dynamic> payload;
+              try {
+                payload = Map<String, dynamic>.from(msg.payload);
+              } catch (e) {
+                debugPrint('Invalid end_race payload format: $e');
+                continue;
+              }
+
+              // Inspect winner info
+              final winnerIdRaw = payload['winnerId'];
+              final winnerNameRaw = payload['winnerName'];
+              final bool payloadHasWinner = (winnerIdRaw != null && winnerIdRaw.toString().isNotEmpty) ||
+                                            (winnerNameRaw != null && winnerNameRaw.toString().isNotEmpty);
+
+              // total slots expected for this race and local completion status
+              final totalSlots = _quizSelectedIndices.length;
+              final bool localCompleted = (totalSlots > 0) && (_quizScore >= totalSlots);
+
+              if (!_raceStarted && _quizSelectedIndices.isEmpty) {
+                // We haven't started a local race and have no quiz slots selected yet.
+                // An `end_race` received here is likely the tail of a previous race
+                // (sent before we joined) — ignore it unconditionally to avoid
+                // showing stale results to a player joining a public room.
+                debugPrint('Received end_race before local race start — ignoring.');
+                continue;
+              }
+
+              // If the server named the local player as winner but the local player hasn't completed the required
+              // number of correct answers, ignore it (we only show "you won" when local actually finished).
+              if (payloadHasWinner && (winnerIdRaw == _collab.localPlayerId || winnerNameRaw == _nameController.text.trim()) && !localCompleted) {
+                debugPrint('Ignoring end_race: server named local as winner but local not finished (score=$_quizScore / required=$totalSlots).');
+                continue;
+              }
+
+              // Prevent re-entry / duplicate handling
+              if (_handlingEndRace || _raceEndedByServer) {
+                debugPrint('Received end_race but already handling or marked ended — ignoring.');
+                continue;
+              }
+
+              try {
+                final payloadCopy = Map<String, dynamic>.from(msg.payload);
+                // fire-and-forget the handler (it contains guards).
+                _handleServerEndRace(payloadCopy);
+              } catch (e) {
+                debugPrint('Error handling server end_race: $e');
+              }
             }
           }
-        }
-      });
+        },
+        onError: (err) {
+          debugPrint('Error in messagesStream(${_currentRoomCode ?? "unknown"}): $err');
+        },
+        cancelOnError: false,
+      );
+
       // Periodic presence update
       _presenceTimer?.cancel();
       _presenceTimer = Timer.periodic(const Duration(seconds: 8), (_) {
@@ -859,12 +1356,17 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     }
   }
 
-  void _showPrivateJoinDialog(int index, String title) {
-    // Default name: username + random 3-digit number
-    _nameController.text = 'Player${Random().nextInt(900) + 100}';
+  Future<void> _showPrivateJoinDialog(int index, String title) async {
+    // Try to use profile username if available, otherwise fall back to random Player###.
+    final profileName = await _fetchProfileUsername();
+    if (profileName.isNotEmpty) {
+      _nameController.text = profileName;
+    } else {
+      _nameController.text = 'Player${Random().nextInt(900) + 100}';
+    }
+
     final questionsPerTrack = {0: 5, 1: 9, 2: 12, 3: 16, 4: 20};
     final qCount = questionsPerTrack[_safeIndex(index)] ?? 12;
-
     showDialog(
       context: context,
       builder: (context) {
@@ -900,22 +1402,16 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.green,
                       ),
-                      // Inside the "Create Room" button's onPressed
                       onPressed: () async {
-                        // Generate a simplified room code from car models
                         final carModels = carData.map((car) => car['model']!).toList()..shuffle();
                         String roomCode = carModels.isNotEmpty ? carModels.first : 'room${Random().nextInt(900) + 100}';
-                        // Simplify room code: first word, lowercase, alphanumeric only
                         roomCode = roomCode.split(' ').first.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
-                        // Close the current dialog
                         Navigator.of(context).pop();
-                        // Join the created room
                         final playerName = _nameController.text.trim().isEmpty
                             ? 'Player${Random().nextInt(900) + 100}'
                             : _nameController.text.trim();
                         debugPrint('Creating/joining private room: $roomCode as $playerName');
                         FocusScope.of(context).unfocus();
-                        // Join the room as creator
                         _joinPrivateGame(index, playerName, roomCode, isCreator: true);
                       },
                       child: const Text('Create Room'),
@@ -945,7 +1441,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.red,
                   ),
-                  // Inside the "Join Room" button's onPressed
                   onPressed: () {
                     final playerName = _nameController.text.trim().isEmpty
                         ? 'Player${Random().nextInt(900) + 100}'
@@ -960,7 +1455,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                     debugPrint('Joining private room: $roomCode as $playerName');
                     FocusScope.of(context).unfocus();
                     Navigator.of(context).pop();
-                    // Join the room as non-creator
                     _joinPrivateGame(index, playerName, roomCode, isCreator: false);
                   },
                   child: const Text('Join Room'),
@@ -973,79 +1467,147 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     );
   }
 
+  // --- replace the entire _askNextQuestion() with this function ---
   Future<void> _askNextQuestion() async {
     if (!mounted) return;
 
-    // stop immediately if user aborted or left view
-    if (_raceAborted || !_inPublicRaceView) return;
-
-    if (_quizCurrentPos >= _quizSelectedIndices.length) {
-      // finished all steps -> start full continuous race
-      setState(() {
-      });
-      _startCar();
+    // quick guard: don't re-enter
+    if (_isAskingQuestion) {
+      debugPrint('_askNextQuestion: re-entry avoided');
       return;
     }
+    _isAskingQuestion = true;
 
-    final qIndex = _quizSelectedIndices[_quizCurrentPos];
-
-    // If abort happened before selecting handler, stop.
-    if (_raceAborted || !_inPublicRaceView) return;
-
-    final handler = handlerByIndex[qIndex];
-    if (handler == null) {
-      // safety: skip to next
-      _quizCurrentPos++;
-      // stop if abort set
+    try {
+      // stop immediately if user aborted or left view
       if (_raceAborted || !_inPublicRaceView) return;
-      await _advanceByStep();
-      return _askNextQuestion();
-    }
 
-    // Ask question. If the user used Leave inside the question, the onLeave callback
-    // sets _raceAborted and resets the view. The question page itself will pop and
-    // return false as the result (we still treat it as 'not correct'),
-    // but we must check _raceAborted afterwards to avoid continuing the loop.
-    final correct = await handler(_quizCurrentPos + 1, currentScore: _quizScore, totalQuestions: _quizSelectedIndices.length);
-
-    // If the race was aborted during the question, stop the loop now.
-    if (_raceAborted || !_inPublicRaceView) return;
-    if (!mounted) return;
-
-    if (correct) {
-      _quizScore++;
-      _quizCurrentPos++;
-      // Update local player's score via CollabWanService
-      if (_currentRoomCode != null) {
-        final localPlayerId = _collab.localPlayerId;
-        await _collab.sendMessage(_currentRoomCode!, {
-          'type': 'score_update',
-          'playerId': localPlayerId,
-          'score': _quizScore,
-        });
+      // Hide waiting UI while we prepare the question
+      if (_waitingForNextQuestion) {
+        setState(() => _waitingForNextQuestion = false);
       }
-      await _advanceByStep();
-      // Set waiting for next question
-      setState(() {
-        _waitingForNextQuestion = true;
-      });
-    } else {
-      // Update local player's errors via CollabWanService
-      if (_currentRoomCode != null) {
-        final localPlayerId = _collab.localPlayerId;
-        final currentErrors = _playersInRoom
-            .firstWhere((p) => p.id == localPlayerId, orElse: () => PlayerInfo(id: '', displayName: '', lastSeen: DateTime.now(), score: 0, errors: 0))
-            .errors;
-        await _collab.sendMessage(_currentRoomCode!, {
-          'type': 'error_update',
-          'playerId': localPlayerId,
-          'errors': currentErrors + 1,
-        });
+
+      final totalSlots = _quizSelectedIndices.length;
+
+      // If we've already completed all required correct answers -> finish race
+      if (_quizCurrentPos >= totalSlots) {
+        if (mounted) setState(() {}); // ensure UI consistent
+        _startCar();
+        return;
       }
-      // Set waiting for next question
-      setState(() {
-        _waitingForNextQuestion = true;
-      });
+
+      // Safety re-check
+      if (_raceAborted || !_inPublicRaceView) return;
+
+      final qIndex = _quizSelectedIndices[_quizCurrentPos];
+
+      final handler = handlerByIndex[qIndex];
+      if (handler == null) {
+        // No handler for this question type: skip this slot (treat as auto-skip).
+        debugPrint('No handler for question index $qIndex — skipping this slot');
+        // advance the slot (this behaves like a filled slot so player moves forward)
+        _quizCurrentPos++;
+        // If finishing after skipping, start car
+        if (_quizCurrentPos >= totalSlots) {
+          if (mounted) setState(() {});
+          _startCar();
+          return;
+        }
+        // show waiting UI so user can proceed
+        if (mounted) setState(() => _waitingForNextQuestion = true);
+        return;
+      }
+
+      // Ask the question (this pushes the question page and waits for pop).
+      bool correct = false;
+      try {
+        correct = await handler(
+          _quizCurrentPos + 1,
+          currentScore: _quizScore,
+          totalQuestions: totalSlots,
+        );
+      } catch (e, st) {
+        // Protect against handler crashes (e.g., unexpected nulls or asset issues).
+        debugPrint('Question handler for index $qIndex threw: $e\n$st');
+        // Treat as incorrect and allow user to continue rather than crashing the whole page.
+        correct = false;
+      }
+
+      // Stop if user left during question
+      if (_raceAborted || !_inPublicRaceView) return;
+      if (!mounted) return;
+
+      final localPlayerId = _collab.localPlayerId;
+
+      if (correct) {
+        // Correct -> increment score and advance the slot and move car
+        _quizScore++;
+
+        // Notify server of new score (best-effort)
+        if (_currentRoomCode != null) {
+          try {
+            await _collab.sendMessage(_currentRoomCode!, {
+              'type': 'score_update',
+              'playerId': localPlayerId,
+              'score': _quizScore,
+            });
+          } catch (e) {
+            debugPrint('Failed to send score_update: $e');
+          }
+        }
+
+        // Advance the slot only when correct
+        _quizCurrentPos++;
+
+        // Move car visually one step
+        if (_raceAborted || !_inPublicRaceView) return;
+        try {
+          // Ensure stepDistance is valid; if not, attempt a safe recompute.
+          if (_stepDistance <= 0 || _totalPathLength <= _eps) {
+            final W = MediaQuery.of(context).size.width;
+            final H = max(100.0, MediaQuery.of(context).size.height - 120.0);
+            await _preparePath(W, H, _safeIndex(_activeTrackIndex));
+            _stepDistance = (_totalPathLength > 0 ? _totalPathLength / totalSlots : 0.0);
+          }
+          await _advanceByStep();
+        } catch (e, st) {
+          debugPrint('Error advancing car for track ${_safeIndex(_activeTrackIndex)} after question $qIndex: $e\n$st');
+          // Fall back: ensure we don't deadlock the quiz; mark waiting so user can continue.
+          if (mounted) setState(() => _waitingForNextQuestion = true);
+        }
+
+        // If we've now completed all slots (i.e. got required number of correct answers), finish
+        if (_quizCurrentPos >= totalSlots) {
+          if (mounted) setState(() {});
+          _startCar();
+          return;
+        }
+
+        // Otherwise show waiting badge and let user press Next to continue
+        if (mounted) setState(() => _waitingForNextQuestion = true);
+      } else {
+        // Incorrect -> increment error count on server, do NOT advance the slot or move the car
+        if (_currentRoomCode != null) {
+          // best-effort compute current errors and increment
+          final currentErrors = _playersInRoom
+              .firstWhere((p) => p.id == localPlayerId, orElse: () => PlayerInfo(id: '', displayName: '', lastSeen: DateTime.now(), score: 0, errors: 0))
+              .errors;
+          try {
+            await _collab.sendMessage(_currentRoomCode!, {
+              'type': 'error_update',
+              'playerId': localPlayerId,
+              'errors': currentErrors + 1,
+            });
+          } catch (e) {
+            debugPrint('Failed to send error_update: $e');
+          }
+        }
+
+        // Do NOT change _quizCurrentPos or _quizScore. Let the user try again (or get a new question for same slot).
+        if (mounted) setState(() => _waitingForNextQuestion = true);
+      }
+    } finally {
+      _isAskingQuestion = false;
     }
   }
 
@@ -1388,13 +1950,17 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     return null;
   }
 
-  void _showPublicJoinDialog(int index, String title, {String? roomCodeOverride}) {
-    // default name: username + random 3-digit number
-    _nameController.text = 'Player${Random().nextInt(900) + 100}';
+  Future<void> _showPublicJoinDialog(int index, String title, {String? roomCodeOverride}) async {
+    // Try to use profile username if available, otherwise fallback to random Player###.
+    final profileName = await _fetchProfileUsername();
+    if (profileName.isNotEmpty) {
+      _nameController.text = profileName;
+    } else {
+      _nameController.text = 'Player${Random().nextInt(900) + 100}';
+    }
 
     final questionsPerTrack = {0: 5, 1: 9, 2: 12, 3: 16, 4: 20};
     final qCount = questionsPerTrack[_safeIndex(index)] ?? 12;
-
     showDialog(
       context: context,
       builder: (context) {
@@ -1433,19 +1999,11 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                 final playerName = _nameController.text.trim().isEmpty
                     ? 'Player${Random().nextInt(900) + 100}'
                     : _nameController.text.trim();
-
                 debugPrint('Joining as: $playerName (roomOverride=$roomCodeOverride)');
-
-                // 1) Close keyboard
                 FocusScope.of(context).unfocus();
-
-                // 2) Close dialog
                 Navigator.of(context).pop();
-
-                // 3) Wait a short moment so the keyboard/layout settles, then join.
                 Future.delayed(const Duration(milliseconds: 250), () {
                   if (!mounted) return;
-                  // Pass the optional override room code to _joinPublicGame
                   _joinPublicGame(index, playerName, roomCodeOverride: roomCodeOverride);
                 });
               },
@@ -1567,7 +2125,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     );
   }
 
-  // join a public game for a given track index and display name
   Future<void> _joinPublicGame(int index, String displayName, {String? roomCodeOverride}) async {
     // mark UI state (local)
     setState(() {
@@ -1628,48 +2185,109 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         }
       });
 
-      // Listen for score/error updates via messages
-      _messagesSub = _collab.messagesStream(_currentRoomCode!).listen((messages) {
-        for (final msg in messages) {
-          if (msg.payload['type'] == 'score_update') {
-            setState(() {
-              _playersInRoom = _playersInRoom.map((p) {
-                if (p.id == msg.payload['playerId']) {
-                  return PlayerInfo(
-                    id: p.id,
-                    displayName: p.displayName,
-                    lastSeen: p.lastSeen,
-                    score: msg.payload['score'],
-                    errors: p.errors,
-                  );
-                }
-                return p;
-              }).toList();
-            });
-          } else if (msg.payload['type'] == 'error_update') {
-            setState(() {
-              _playersInRoom = _playersInRoom.map((p) {
-                if (p.id == msg.payload['playerId']) {
-                  return PlayerInfo(
-                    id: p.id,
-                    displayName: p.displayName,
-                    lastSeen: p.lastSeen,
-                    score: p.score,
-                    errors: msg.payload['errors'],
-                  );
-                }
-                return p;
-              }).toList();
-            });
-          } else if (msg.payload['type'] == 'start_race') {
-            // Start the race for all players when the message is received
-            if (!_raceStarted) {
-              debugPrint('Received start_race message, starting race!');
-              _startQuizRace();
+      // Listen for score/error updates + start_race + end_race
+      _messagesSub = _collab.messagesStream(_currentRoomCode!).listen(
+        (messages) {
+          for (final msg in messages) {
+            final type = msg.payload['type'];
+            if (type == 'score_update') {
+              setState(() {
+                _playersInRoom = _playersInRoom.map((p) {
+                  if (p.id == msg.payload['playerId']) {
+                    return PlayerInfo(
+                      id: p.id,
+                      displayName: p.displayName,
+                      lastSeen: p.lastSeen,
+                      score: msg.payload['score'],
+                      errors: p.errors,
+                    );
+                  }
+                  return p;
+                }).toList();
+              });
+            } else if (type == 'error_update') {
+              setState(() {
+                _playersInRoom = _playersInRoom.map((p) {
+                  if (p.id == msg.payload['playerId']) {
+                    return PlayerInfo(
+                      id: p.id,
+                      displayName: p.displayName,
+                      lastSeen: p.lastSeen,
+                      score: p.score,
+                      errors: msg.payload['errors'],
+                    );
+                  }
+                  return p;
+                }).toList();
+              });
+            } else if (type == 'start_race') {
+              // Start the race for all players when the message is received
+              if (!_raceStarted) {
+                debugPrint('Received start_race message, starting race!');
+                _startQuizRace();
+              }
+            } else if (type == 'end_race') {
+              // If we're not showing the race UI, ignore stale end_race messages.
+              if (!_inPublicRaceView) {
+                debugPrint('Received end_race but not in public race view — ignoring.');
+                continue;
+              }
+
+              // Extract payload copy
+              Map<String, dynamic> payload;
+              try {
+                payload = Map<String, dynamic>.from(msg.payload);
+              } catch (e) {
+                debugPrint('Invalid end_race payload format: $e');
+                continue;
+              }
+
+              // Inspect winner info
+              final winnerIdRaw = payload['winnerId'];
+              final winnerNameRaw = payload['winnerName'];
+              final bool payloadHasWinner = (winnerIdRaw != null && winnerIdRaw.toString().isNotEmpty) ||
+                                            (winnerNameRaw != null && winnerNameRaw.toString().isNotEmpty);
+
+              // total slots expected for this race and local completion status
+              final totalSlots = _quizSelectedIndices.length;
+              final bool localCompleted = (totalSlots > 0) && (_quizScore >= totalSlots);
+
+              // If a race hasn't started locally AND we have no quiz slots yet,
+              // ignore any end_race message. This avoids showing results for a
+              // race that completed before we joined the room (common when
+              // entering public tracks like Monza).
+              if (!_raceStarted && _quizSelectedIndices.isEmpty) {
+                debugPrint('Received end_race before local race start — ignoring.');
+                continue;
+              }
+
+              // If the server named the local player as winner but the local player hasn't completed the required
+              // number of correct answers, ignore it (we only show "you won" when local actually finished).
+              if (payloadHasWinner && (winnerIdRaw == _collab.localPlayerId || winnerNameRaw == _nameController.text.trim()) && !localCompleted) {
+                debugPrint('Ignoring end_race: server named local as winner but local not finished (score=$_quizScore / required=$totalSlots).');
+                continue;
+              }
+
+              // Prevent re-entry / duplicate handling
+              if (_handlingEndRace || _raceEndedByServer) {
+                debugPrint('Received end_race but already handling or marked ended — ignoring.');
+                continue;
+              }
+
+              try {
+                // fire-and-forget the handler (it contains guards).
+                _handleServerEndRace(payload);
+              } catch (e) {
+                debugPrint('Error handling server end_race: $e');
+              }
             }
           }
-        }
-      });
+        },
+        onError: (err) {
+          debugPrint('Error in messagesStream(${_currentRoomCode ?? "unknown"}): $err');
+        },
+        cancelOnError: false,
+      );
 
       // periodic presence update
       _presenceTimer?.cancel();
