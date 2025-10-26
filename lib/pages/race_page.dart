@@ -5,10 +5,9 @@ import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:shared_preferences/shared_preferences.dart';
-
 import '../services/audio_feedback.dart';
 import '../services/image_service_cache.dart';
-import '../services/collab_wan_service.dart'; // <<-- NEW
+import '../services/collab_wan_service.dart';
 
 class RacePage extends StatefulWidget {
   final String? username;
@@ -78,8 +77,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   bool _waitingForNextQuestion = false;
   StreamSubscription<List<CollabMessage>>? _messagesSub;
   bool _raceEndedByServer = false;
-  String? _serverWinnerId;
-  String? _serverWinnerName;
 
   // quiz / step-race state
   List<int> _quizSelectedIndices = [];
@@ -88,6 +85,8 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   double _currentDistance = 0.0; // traveled distance in px along path
   double _stepDistance = 0.0;    // _totalPathLength / totalQuestions
   String? _roomCreatorId;
+  // Tracks each opponent's progress along the race track (0.0–1.0)
+  Map<String, double> _opponentProgress = {};
 
   // --- path data for tracks (normalized coords in [0..1]) ---
   // Monza (RaceTrack0) — the list you asked for
@@ -137,7 +136,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   double _totalPathLength = 0.0;
   // reentrancy guard to avoid parallel question loops
   bool _isAskingQuestion = false;
-  DateTime? _roomJoinedAt; // set when we join a room
 
   // small epsilon for numeric stability
   static const double _eps = 1e-6;
@@ -504,8 +502,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
     // mark that *we* are ending the race and inform others — include winnerName so receivers can show it
     _raceEndedByServer = true;
-    _serverWinnerId = winner.id;
-    _serverWinnerName = winner.displayName;
 
     if (room != null) {
       try {
@@ -2126,7 +2122,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   }
 
   Future<void> _joinPublicGame(int index, String displayName, {String? roomCodeOverride}) async {
-    // mark UI state (local)
+    // Mark UI state (local)
     setState(() {
       _activeTrackIndex = index;
       _inPublicRaceView = true;
@@ -2144,25 +2140,25 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     _carController.stop();
     _carController.reset();
 
-    // allow an override (used when joining an existing waiting room),
+    // Allow an override (used when joining an existing waiting room),
     // otherwise default to canonical per-track room
     final roomCode = roomCodeOverride ?? 'TRACK_${index}';
     _currentRoomCode = roomCode;
 
     try {
-      // create/join room (createRoom calls joinRoom internally)
+      // Create/join room (createRoom calls joinRoom internally)
       await _collab.createRoom(roomCode, displayName: displayName);
 
-      // initial presence touch
+      // Initial presence touch
       unawaited(_collab.touchPresence(roomCode));
       // Clean up stale players when joining
       await _collab.cleanupStalePlayers(roomCode, ttl: const Duration(seconds: 15));
 
-      // subscribe to players list
+      // Subscribe to players list
       _playersSub?.cancel();
       _playersSub = _collab.playersStream(roomCode).listen((players) {
         if (!mounted) return;
-        // Merge the incoming players with the current _playersInRoom to preserve score/errors
+        // Merge incoming players with existing ones to preserve score/errors
         setState(() {
           _playersInRoom = players.map((newPlayer) {
             final existingPlayer = _playersInRoom.firstWhere(
@@ -2178,6 +2174,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
             );
           }).toList();
         });
+
         // Auto-start if 2+ players and not already started
         if (!_raceStarted && players.length >= 2) {
           debugPrint('Starting race with ${players.length} players!');
@@ -2252,11 +2249,11 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
               final totalSlots = _quizSelectedIndices.length;
               final bool localCompleted = (totalSlots > 0) && (_quizScore >= totalSlots);
 
-              // If a race hasn't started locally AND we have no quiz slots yet,
-              // ignore any end_race message. This avoids showing results for a
-              // race that completed before we joined the room (common when
-              // entering public tracks like Monza).
               if (!_raceStarted && _quizSelectedIndices.isEmpty) {
+                // We haven't started a local race and have no quiz slots selected yet.
+                // An `end_race` received here is likely the tail of a previous race
+                // (sent before we joined) — ignore it unconditionally to avoid
+                // showing stale results to a player joining a public room.
                 debugPrint('Received end_race before local race start — ignoring.');
                 continue;
               }
@@ -2275,8 +2272,9 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
               }
 
               try {
+                final payloadCopy = Map<String, dynamic>.from(msg.payload);
                 // fire-and-forget the handler (it contains guards).
-                _handleServerEndRace(payload);
+                _handleServerEndRace(payloadCopy);
               } catch (e) {
                 debugPrint('Error handling server end_race: $e');
               }
@@ -2289,7 +2287,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         cancelOnError: false,
       );
 
-      // periodic presence update
+      // Periodic presence update
       _presenceTimer?.cancel();
       _presenceTimer = Timer.periodic(const Duration(seconds: 8), (_) {
         if (_currentRoomCode != null) {
@@ -2298,7 +2296,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       });
     } catch (e) {
       debugPrint('Failed to join/create room $roomCode: $e');
-      // tidy up and give feedback
       _playersSub?.cancel();
       _presenceTimer?.cancel();
       _playersInRoom = [];
