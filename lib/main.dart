@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'services/premium_service.dart';
+import 'services/ad_service.dart';
 
 // REMOVED: import 'pages/welcome_page.dart';
 import 'pages/home_page.dart';
@@ -14,7 +15,7 @@ import 'pages/welcome_page.dart';
 import 'services/sound_manager.dart';
 import 'pages/training_page.dart';
 
-import 'storage/lives_storage.dart';
+import 'services/lives_storage.dart';
 import 'package:tutorial_coach_mark/tutorial_coach_mark.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'services/firebase_options.dart';
@@ -26,6 +27,9 @@ final GlobalKey<ScaffoldMessengerState> scaffoldMessengerKey = GlobalKey<Scaffol
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Set true during local dev to use test ads
+  await AdService.instance.init(testMode: false);
 
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,

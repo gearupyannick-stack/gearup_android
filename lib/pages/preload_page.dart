@@ -6,7 +6,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import '../main.dart';
-import '../storage/lives_storage.dart';
+import '../services/lives_storage.dart';
 import '../services/image_service_cache.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 

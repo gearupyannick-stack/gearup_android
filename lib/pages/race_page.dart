@@ -85,9 +85,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   double _currentDistance = 0.0; // traveled distance in px along path
   double _stepDistance = 0.0;    // _totalPathLength / totalQuestions
   String? _roomCreatorId;
-  // Tracks each opponent's progress along the race track (0.0–1.0)
-  Map<String, double> _opponentProgress = {};
-
+  
   // --- path data for tracks (normalized coords in [0..1]) ---
   // Monza (RaceTrack0) — the list you asked for
   final List<List<double>> _monzaNorm = [
