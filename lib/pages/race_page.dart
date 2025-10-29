@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/audio_feedback.dart';
 import '../services/image_service_cache.dart';
 import '../services/collab_wan_service.dart';
+import '../services/ad_service.dart';
 
 class RacePage extends StatefulWidget {
   final String? username;
@@ -86,6 +87,9 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   double _stepDistance = 0.0;    // _totalPathLength / totalQuestions
   String? _roomCreatorId;
   
+  // ADD these fields inside _RacePageState
+  static const String _kRaceInterstitialCounterKey = 'race_interstitial_counter';
+
   // --- path data for tracks (normalized coords in [0..1]) ---
   // Monza (RaceTrack0) — the list you asked for
   final List<List<double>> _monzaNorm = [
@@ -255,6 +259,21 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     );
   }
 
+  Future<void> _loadRaceInterstitialCounter() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      prefs.getInt(_kRaceInterstitialCounterKey);
+      if (mounted) {
+        setState(() {
+        });
+      } else {
+      }
+    } catch (e) {
+      // ignore errors gracefully
+      // print('Failed to load race interstitial counter: $e');
+    }
+  }
+
   PlayerInfo _determineWinner(List<PlayerInfo> players) {
     if (players.isEmpty) {
       return PlayerInfo(id: '', displayName: 'No one', lastSeen: DateTime.now(), score: 0, errors: 0);
@@ -417,6 +436,13 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         debugPrint('Error leaving room after end_race: $e');
       }
 
+      // **Show interstitial AFTER user dismissed results dialog and after leaving the room**
+      try {
+        await _maybeShowRaceInterstitial();
+      } catch (e, st) {
+        debugPrint('Race interstitial attempt failed in server end flow: $e\n$st');
+      }
+
       if (!mounted) return;
       setState(() {
         _inPublicRaceView = false;
@@ -518,6 +544,13 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
     // cleanup & leave room, return to track grid
     await _leaveCurrentRoom();
+
+    // **Show interstitial AFTER user dismissed results dialog and after leaving the room**
+    try {
+      await _maybeShowRaceInterstitial();
+    } catch (e, st) {
+      debugPrint('Race interstitial attempt failed: $e\n$st');
+    }
 
     if (!mounted) return;
     setState(() {
@@ -721,14 +754,22 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       MaterialPageRoute(
         builder: (_) => _QuestionPage(
           content: content,
-          onLeave: () {
+          onLeave: () async {
             // Called when user chooses Leave from the question AppBar.
-            // Stop animation, tell backend to remove/reset our presence/score, and reset UI.
             try { _carController.stop(); } catch (_) {}
 
-            // Best-effort notify server and remove presence/score when leaving from the question.
-            // Fire-and-forget; we don't await because this callback must remain synchronous.
-            _leaveCurrentRoom();
+            // best-effort notify server and remove presence/score when leaving from the question.
+            await _leaveCurrentRoom();
+
+            // Only attempt ad if there was race activity
+            final bool hadProgress = _raceStarted || _quizCurrentPos > 0 || _quizScore > 0;
+            if (hadProgress) {
+              try {
+                await _maybeShowRaceInterstitial();
+              } catch (e) {
+                debugPrint('Race interstitial on leave (question) failed: $e');
+              }
+            }
 
             if (!mounted) return;
             setState(() {
@@ -1203,9 +1244,9 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       await _collab.cleanupStalePlayers(roomCode, ttl: const Duration(seconds: 15));
       // Subscribe to players list
       _playersSub?.cancel();
-      _playersSub = _collab.playersStream(roomCode).listen((players) {
+      _playersSub = _collab.playersStream(roomCode).listen((players) async {
         if (!mounted) return;
-        // Merge the incoming players with the current _playersInRoom to preserve score/errors
+        // Merge incoming players with existing ones to preserve score/errors
         setState(() {
           _playersInRoom = players.map((newPlayer) {
             final existingPlayer = _playersInRoom.firstWhere(
@@ -1221,6 +1262,12 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
             );
           }).toList();
         });
+
+        // Auto-start if 2+ players and not already started
+        if (!_raceStarted && players.length >= 2) {
+          debugPrint('Starting race with ${players.length} players!');
+          await _startQuizRace();
+        }
       });
 
       // Listen for score/error updates + start_race + end_race
@@ -1658,6 +1705,15 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     }
   }
 
+  Future<void> _maybeShowRaceInterstitial() async {
+    try {
+      await AdService.instance.incrementRaceAndMaybeShow();
+    } catch (e, st) {
+      debugPrint('AdService.incrementRaceAndMaybeShow failed: $e\n$st');
+    }
+  }
+
+
   @override
   void initState() {
     super.initState();
@@ -1665,6 +1721,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       vsync: this,
       duration: const Duration(seconds: 6),
     );
+    _loadRaceInterstitialCounter();
     _tracksNorm = {
       0: _monzaNorm,
       1: _monacoNorm,
@@ -2568,9 +2625,13 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                       ),
                       onPressed: () async {
                         debugPrint('Room creator started the race!');
-                        await _collab.sendMessage(_currentRoomCode!, {
-                          'type': 'start_race',
-                        });
+                        try {
+                          await _collab.sendMessage(_currentRoomCode!, {
+                            'type': 'start_race',
+                          });
+                        } catch (e) {
+                          debugPrint('Failed to send start_race: $e');
+                        }
                         await _startQuizRace();
                       },
                       child: const Text(
@@ -2596,8 +2657,20 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                       ),
                       onPressed: () async {
+                        // stop animation and leave the room first
                         _carController.stop();
                         await _leaveCurrentRoom();
+
+                        // Only attempt to show ad if there was race activity (started or progress)
+                        final bool hadProgress = _raceStarted || _quizCurrentPos > 0 || _quizScore > 0;
+                        if (hadProgress) {
+                          try {
+                            await _maybeShowRaceInterstitial();
+                          } catch (e) {
+                            debugPrint('Race interstitial on leave failed: $e');
+                          }
+                        }
+
                         if (!mounted) return;
                         setState(() {
                           _inPublicRaceView = false;

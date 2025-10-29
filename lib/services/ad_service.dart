@@ -339,44 +339,84 @@ class AdService {
     }
 
     final completer = Completer<bool>();
+    bool _earned = false;
 
     ad.fullScreenContentCallback = FullScreenContentCallback(
       onAdShowedFullScreenContent: (ad) => debugPrint('Rewarded shown'),
       onAdDismissedFullScreenContent: (ad) {
         debugPrint('Rewarded dismissed');
-        completer.complete(false);
-        ad.dispose();
+        // If the reward was earned, report success; otherwise false.
+        if (!completer.isCompleted) completer.complete(_earned);
+        try { ad.dispose(); } catch (_) {}
       },
       onAdFailedToShowFullScreenContent: (ad, err) {
         debugPrint('Rewarded failed to show: ${err.message}');
-        completer.complete(false);
-        ad.dispose();
+        if (!completer.isCompleted) completer.complete(false);
+        try { ad.dispose(); } catch (_) {}
       },
     );
 
-    ad.show(onUserEarnedReward: (ad, reward) {
-      debugPrint('User earned reward: ${reward.amount} ${reward.type}');
-      try {
-        onEarned(reward);
-      } catch (e) {
-        debugPrint('onEarned callback failed: $e');
-      }
-    });
+    try {
+      // onUserEarnedReward signature can differ between versions; handle common signature:
+      final dynamic _onUserEarnedReward = (dynamic a, [dynamic b]) {
+        RewardItem? reward;
+        if (a is RewardItem) {
+          reward = a;
+        } else if (b is RewardItem) {
+          reward = b;
+        }
 
-    return completer.future.timeout(const Duration(seconds: 20), onTimeout: () {
-      debugPrint('Rewarded show timeout');
+        if (reward == null) {
+          debugPrint('User earned reward called but no RewardItem found (a=${a.runtimeType}, b=${b.runtimeType})');
+          // don't mark as earned if we can't interpret reward
+          if (!completer.isCompleted) completer.complete(false);
+          return;
+        }
+
+        debugPrint('User earned reward: ${reward.amount} ${reward.type}');
+        _earned = true;
+        try {
+          onEarned(reward);
+        } catch (e) {
+          debugPrint('onEarned callback failed: $e');
+        }
+        if (!completer.isCompleted) completer.complete(true);
+      };
+
+      // call show with dynamic wrapper to support either API signature
+      ad.show(onUserEarnedReward: _onUserEarnedReward);
+    } catch (e) {
+      debugPrint('Exception while calling show(): $e');
+      if (!completer.isCompleted) completer.complete(false);
       try { ad.dispose(); } catch (_) {}
-      return false;
-    });
+    }
+
+    // Nullify the in-memory ad reference at the caller side (caller already does in many places).
+    // Wait for the result (with a reasonable timeout).
+    bool result = false;
+    try {
+      result = await completer.future.timeout(const Duration(seconds: 20));
+    } catch (e) {
+      debugPrint('Rewarded show timeout or error: $e');
+      result = false;
+    }
+
+    debugPrint('Rewarded show result = $result (earned=$_earned)');
+    return result;
   }
 
-  /// Show rewarded for home life (+1 life). Grant the life in the onEarned callback.
   Future<bool> showRewardedHomeLife({required Function onEarnedLife}) async {
     final ad = _rewardedHomeLife;
+    debugPrint('AdService: showRewardedHomeLife called, ad ready=${ad != null}');
     final shown = await _tryShowRewarded(ad, onEarned: (reward) {
-      onEarnedLife();
+      try {
+        onEarnedLife();
+      } catch (e) {
+        debugPrint('Error in onEarnedLife callback: $e');
+      }
     });
     _loadRewardedHomeLife();
+    debugPrint('AdService: showRewardedHomeLife returned $shown');
     return shown;
   }
 

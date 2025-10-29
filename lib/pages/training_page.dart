@@ -207,7 +207,7 @@ class _TrainingPageState extends State<TrainingPage> {
 
   Future<void> _navigateToChallenge(Widget page) async {
     // open the challenge page and wait until the user returns
-    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
+    final result = await Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
 
     // --- refresh local persisted temp trials so UI shows correct remaining immediately
     try {
@@ -217,7 +217,6 @@ class _TrainingPageState extends State<TrainingPage> {
     }
 
     // --- best-effort: ask PremiumService to refresh its internal counters if such method exists
-    // (we don't know the exact API of PremiumService in every version, so we try a few names)
     try {
       final premium = PremiumService.instance;
       final dynamic dyn = premium as dynamic;
@@ -235,7 +234,21 @@ class _TrainingPageState extends State<TrainingPage> {
     // Force a rebuild so the header counter reads the fresh values (premium.remainingTrainingAttempts + _tempAdGrantedTrials)
     if (mounted) setState(() {});
 
-    // existing behavior: call optional external callback to record completion
+    // If the pushed challenge returned `true`, treat that as a successful completion
+    // and notify the parent via onLifeWon so it can actually increment lives & refresh UI.
+    try {
+      if (result == true) {
+        await widget.onLifeWon?.call();
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('+1 life earned!')));
+        }
+      }
+    } catch (e) {
+      debugPrint('TrainingPage: error awarding life after training: $e');
+    }
+
+    // existing behaviour: call optional external callback to record completion
     widget.recordChallengeCompletion?.call();
 
     // increment challenge counter (and show interstitial per your rule every 5)

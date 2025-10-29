@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'services/premium_service.dart';
 import 'services/ad_service.dart';
+import 'pages/premium_page.dart';
 
 // REMOVED: import 'pages/welcome_page.dart';
 import 'pages/home_page.dart';
@@ -249,7 +250,7 @@ class _MainPageState extends State<MainPage> {
 
   // ── CONFIG ─────────────────────────────────────────
   static const int _maxLives = 5;
-  static const int _refillInterval = 600; // seconds per life
+  static const int _refillInterval = 900; // seconds per life
 
   // ── STATE ──────────────────────────────────────────
   int _currentIndex = 0;
@@ -258,6 +259,7 @@ class _MainPageState extends State<MainPage> {
   Timer? _lifeTimer;
   bool _hasShownRatePopup = false;
   final ValueNotifier<int> _lifeTimerRemaining = ValueNotifier<int>(0);
+  bool _isShowingAdAction = false;
 
   // ── KEYS & PAGES ───────────────────────────────────
   final GlobalKey _gearKey        = GlobalKey();
@@ -297,11 +299,23 @@ class _MainPageState extends State<MainPage> {
         recordChallengeCompletion: recordChallengeCompletion,
         firstFlagKey: _firstFlagKey,
         levelProgressKey: _levelProgressKey,
+        onLivesChanged: (newLives) {
+          // update the central lives value in MainPage immediately
+          setState(() => lives = newLives);
+        },
       ),
       TrainingPage(
         onLifeWon: () async {
-          int newLives = await widget.livesStorage.readLives();
-          setState(() => lives = newLives);
+          try {
+            await _applyGrantedLife();
+          } catch (e) {
+            debugPrint('onLifeWon -> _applyGrantedLife failed: $e');
+            // fallback read & refresh
+            try {
+              final int newLives = await widget.livesStorage.readLives();
+              if (mounted) setState(() => lives = newLives);
+            } catch (_) {}
+          }
         },
         recordChallengeCompletion: recordChallengeCompletion,
       ),
@@ -313,6 +327,72 @@ class _MainPageState extends State<MainPage> {
     _loadDayStreak();
     _initializeChallengeStatus();
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowTutorial());
+  }
+
+  /// Apply a granted life: persist, update UI and timers.
+  Future<void> _applyGrantedLife() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    // update lives (clamped to _maxLives)
+    setState(() {
+      lives = (lives + 1).clamp(0, _maxLives);
+    });
+
+    // persist via LivesStorage
+    await widget.livesStorage.writeLives(lives);
+
+    // if we're now full, cancel timer and remove nextDue
+    if (lives >= _maxLives) {
+      prefs.remove('nextLifeDueTime');
+      _lifeTimer?.cancel();
+      _lifeTimer = null;
+      _lifeTimerRemaining.value = 0;
+    } else {
+      // schedule next due from now
+      final nextDue = DateTime.now().add(const Duration(seconds: _refillInterval));
+      await prefs.setString('nextLifeDueTime', nextDue.toIso8601String());
+      _lifeTimerRemaining.value = nextDue.difference(DateTime.now()).inSeconds;
+      if (_lifeTimer == null) _startLifeTimer();
+    }
+
+    // immediate feedback
+    scaffoldMessengerKey.currentState?.showSnackBar(
+      const SnackBar(content: Text('Nice — you earned 1 life!')),
+    );
+  }
+
+  Future<void> _onWatchAdForLife() async {
+    if (_isShowingAdAction) return;
+    setState(() => _isShowingAdAction = true);
+
+    scaffoldMessengerKey.currentState?.showSnackBar(const SnackBar(content: Text('Loading ad...')));
+
+    try {
+      // AdService should call the provided onEarnedLife callback synchronously
+      final shown = await AdService.instance.showRewardedHomeLife(
+        onEarnedLife: () {
+          // call async apply helper (don't await here; it updates state itself)
+          _applyGrantedLife();
+        },
+      );
+
+      scaffoldMessengerKey.currentState?.clearSnackBars();
+
+      if (!shown) {
+        scaffoldMessengerKey.currentState?.showSnackBar(
+          const SnackBar(content: Text('Ad unavailable — please try again later.')),
+        );
+      }
+      // if shown==true, the onEarnedLife callback will have run and persisted new lives.
+    } catch (e) {
+      scaffoldMessengerKey.currentState?.clearSnackBars();
+      scaffoldMessengerKey.currentState?.showSnackBar(
+        SnackBar(content: Text('Error showing ad: $e')),
+      );
+      debugPrint('Error in _onWatchAdForLife: $e');
+    } finally {
+      if (mounted) setState(() => _isShowingAdAction = false);
+    }
   }
 
   /// Uses the stored clock to refill lives & compute remaining time.
@@ -1167,20 +1247,59 @@ class _MainPageState extends State<MainPage> {
                     const SizedBox(height: 8),
                     Text("Next life in $minutes min $seconds sec"),
                     const SizedBox(height: 8),
-                    LinearProgressIndicator(
-                      value: progress.clamp(0.0, 1.0),
-                    ),
+                    LinearProgressIndicator(value: progress.clamp(0.0, 1.0)),
                     const SizedBox(height: 16),
-                    ElevatedButton(
-                      onPressed: () {
-                        Navigator.of(context).pop();
-                        setState(() {
-                          _currentIndex = 1; // Go to Training tab
-                        });
-                      },
-                      child: const Text("Train for life"),
+                    // Train for life (go to training tab)
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Theme.of(context).primaryColor,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                        onPressed: () {
+                          Navigator.of(context).pop();
+                          setState(() {
+                            _currentIndex = 1; // go to Training tab
+                          });
+                        },
+                        child: const Text("Train for life"),
+                      ),
                     ),
                     const SizedBox(height: 8),
+                    // Watch ad to get 1 life
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Theme.of(context).primaryColor,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                        onPressed: () {
+                          Navigator.of(context).pop();
+                          _onWatchAdForLife();
+                        },
+                        child: const Text("Watch ad (get 1 life)"),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    // Get unlimited lives -> Premium page
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Theme.of(context).primaryColor,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                        onPressed: () {
+                          Navigator.of(context).pop();
+                          Navigator.of(context, rootNavigator: true).push(
+                            MaterialPageRoute(builder: (_) => const PremiumPage()),
+                          );
+                        },
+                        child: const Text("Get unlimited lives"),
+                      ),
+                    ),
                   ],
                 );
               },

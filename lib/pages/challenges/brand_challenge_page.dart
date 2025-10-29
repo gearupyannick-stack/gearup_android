@@ -150,13 +150,12 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
         actions: [
           TextButton(
             onPressed: () {
-              Navigator.pop(ctx);
-              Navigator.pop(
-                context,
-                '$correctAnswers/20 in '
-                '${elapsedSeconds ~/ 60}\'' 
-                '${(elapsedSeconds % 60).toString().padLeft(2, '0')}\'',
-              );
+              Navigator.of(ctx).pop();
+              if (correctAnswers >= 10) {
+                Navigator.of(context).pop(true);
+              } else {
+                Navigator.pop(context,'$correctAnswers/20 in ${elapsedSeconds ~/ 60}\'${(elapsedSeconds % 60).toString().padLeft(2, '0')}\'\'',);
+              }
             },
             child: const Text('OK'),
           ),

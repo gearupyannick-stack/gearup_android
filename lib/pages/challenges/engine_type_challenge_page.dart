@@ -148,12 +148,12 @@ if (_answered) return;
         actions: [
           TextButton(
             onPressed: () {
-              Navigator.pop(ctx);
-              Navigator.pop(
-                context,
-                '$_correctAnswers/20 in ${_elapsedSeconds ~/ 60}\''
-                '${(_elapsedSeconds % 60).toString().padLeft(2, '0')}\'\'',
-              );
+              Navigator.of(ctx).pop();
+              if (_correctAnswers >= 10) {
+                Navigator.of(context).pop(true);
+              } else {
+                Navigator.pop(context,'$_correctAnswers/20 in ${_elapsedSeconds ~/ 60}\'${(_elapsedSeconds % 60).toString().padLeft(2, '0')}\'\'',);
+              }
             },
             child: const Text('OK'),
           ),

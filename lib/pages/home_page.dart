@@ -6,6 +6,7 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/image_service_cache.dart';
 import '../services/audio_feedback.dart';
+import '../services/ad_service.dart';
 
 /// Raw track point definitions for tracks 2 & 3.
 final Map<int, List<Offset>> _tracks = {
@@ -74,6 +75,7 @@ class HomePage extends StatefulWidget {
   final ValueChanged<int> onGearUpdate;
   final VoidCallback? recordChallengeCompletion;
   final GlobalKey? levelProgressKey;
+  final ValueChanged<int>? onLivesChanged;
 
   const HomePage({
     Key? key,
@@ -85,6 +87,7 @@ class HomePage extends StatefulWidget {
     this.recordChallengeCompletion,
     this.firstFlagKey,
     this.levelProgressKey,
+    this.onLivesChanged,
   }) : super(key: key);
 
   @override
@@ -218,6 +221,9 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   // Original track dimensions (used as the “1.0×1.0” baseline):
   static const double _originalTrackWidth  = 1024;
   static const double _originalTrackHeight = 1536;
+
+  // --- HomePage: ad + UI state
+  bool _isShowingAdAction = false;       // to block double-taps while ad loads/shows
 
   List<Offset> get _currentPathPoints {
     final media     = MediaQuery.of(context);
@@ -458,6 +464,87 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     await prefs.setInt('gearCountBeforeLevel', _gearCountBeforeLevel);
   }
 
+  Future<void> _onWatchAdToPass(Future<void> Function() onPassAction) async {
+    if (_isShowingAdAction) return;
+    setState(() => _isShowingAdAction = true);
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(content: Text('Loading ad...')));
+
+    try {
+      final shown = await AdService.instance.showRewardedHomePass(
+        onPassed: () async {
+          // This callback runs when the ad grant is received.
+          try {
+            await onPassAction();
+          } catch (e) {
+            debugPrint('onPassAction failed: $e');
+          }
+        },
+      );
+
+      messenger.clearSnackBars();
+
+      if (shown) {
+        messenger.showSnackBar(const SnackBar(content: Text('Passed — good luck!')));
+      } else {
+        messenger.showSnackBar(const SnackBar(content: Text('Ad unavailable — please try again later.')));
+      }
+    } catch (e) {
+      messenger.clearSnackBars();
+      messenger.showSnackBar(SnackBar(content: Text('Error showing ad: $e')));
+      debugPrint('Error in _onWatchAdToPass: $e');
+    } finally {
+      if (mounted) setState(() => _isShowingAdAction = false);
+    }
+  }
+
+  Future<void> _showStuckPopup({required Future<void> Function() onPassAction}) async {
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Feeling stuck?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'You failed several times on this flag. Watch a short video to skip this question and automatically get full credit for it.',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 12),
+            // Big buttons styled like the lives popup
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Theme.of(context).primaryColor,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  // call the ad flow, passing the async onPassAction
+                  _onWatchAdToPass(onPassAction);
+                },
+                child: const Text('Watch ad to pass'),
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Close'),
+              ),
+            ),
+          ],
+        ),
+        contentPadding: const EdgeInsets.fromLTRB(24, 20, 24, 12),
+        actionsPadding: const EdgeInsets.only(bottom: 8, right: 8),
+      ),
+    );
+  }
 
   Future<void> _loadGearCount() async {
     final prefs = await SharedPreferences.getInstance();
@@ -517,23 +604,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
   void _audioPlayPageFlip() {
     try { AudioFeedback.instance.playEvent(SoundEvent.pageFlip); } catch (_) {}
-  }
-
-
-  void _showStuckPopup(int flagIndex) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Feeling stuck?'),
-        content: Text('Pass this flag for free by watching an ad.'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: Text('Cancel'),
-          ),
-        ],
-      ),
-    );
   }
 
   Future<void> _loadCarData() async {
@@ -862,8 +932,37 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
             _challengeColors[challengeNumber] = 'red';
             widget.onChallengeFail();
             _retryButtonActive = false;
+
             if (_consecutiveFails >= 3) {
-             _showStuckPopup(flagIndex);
+              // Offer the stuck popup and provide a pass-action that grants full success:
+              await _showStuckPopup(onPassAction: () async {
+                // 1) Reset fail counter and mark green (full success)
+                setState(() {
+                  _consecutiveFails = 0;
+                  _flagStatus[flagIndex] = 'green';
+                  _challengeColors[challengeNumber] = 'green';
+                  _awaitingFlagTap = false;
+                  _retryButtonActive = false;
+                });
+
+                // 2) Award the missing gears for this flag (treat ad as full score)
+                final int prevScore = _previousScores[flagIndex] ?? 0;
+                final int totalQuestions = questionMethods.length;
+                final int delta = totalQuestions - prevScore;
+                if (delta > 0) {
+                  _gearCount += delta;
+                  _previousScores[flagIndex] = totalQuestions;
+                  await _saveGearCount();
+                  widget.onGearUpdate(_gearCount);
+                  // count as a completed challenge for daily streaks / history
+                  widget.recordChallengeCompletion?.call();
+                }
+
+                // 3) Persist progress and move forward
+                await _saveProgressToStorage();
+                // animate forward
+                _animateToNextPoint();
+              });
             }
           }
         } else {
@@ -1650,11 +1749,11 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                 top:  screenPoints[idx].dy - tapSize/2,
                 child: GestureDetector(
                   behavior: HitTestBehavior.translucent,
-                  onTap: (widget.currentLives == 0 || _retryButtonActive)
+                  onTap: (widget.getLives() == 0 || _retryButtonActive)
                         ? null
                         : () {
                             setState(() {
-                              _showRetryButton = false;  // on désactive le flag “Retry”  
+                              _showRetryButton = false;  // on désactive le flag “Retry”
                             });
                             _onFlagTap(idx);             // et relance directement le challenge
                           },
