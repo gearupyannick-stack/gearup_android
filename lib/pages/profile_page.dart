@@ -935,12 +935,11 @@ class _ProfilePageState extends State<ProfilePage> {
                     ),
                   ),
 
-                  // If Google signed in, allow toggling use of Google name/photo
+                  // If Google signed in, show options
                   if (_googleSignedIn) ...[
                     CheckboxListTile(
                       title: const Text('Use Google name & photo'),
                       value: localUseGoogleName,
-                      // NOTER : default onChanged -> use val ?? false (ne ré-init à true jamais)
                       onChanged: (val) => setSt(() => localUseGoogleName = val ?? false),
                     ),
                     const SizedBox(height: 8),
@@ -962,63 +961,9 @@ class _ProfilePageState extends State<ProfilePage> {
                         child: const Text('Disconnect Google'),
                       ),
                     ),
-                  ] else if (_isGuest) ...[
-                    // guest: offer google sign-in button (kept as before)
-                    Center(
-                      child: Semantics(
-                        button: true,
-                        label: 'Sign in with Google',
-                        child: SizedBox(
-                          width: 600,
-                          height: 56,
-                          child: Ink.image(
-                            image: const AssetImage('assets/icons/google.png'),
-                            fit: BoxFit.contain,
-                            child: InkWell(
-                              borderRadius: BorderRadius.circular(8),
-                              onTap: () async {
-                                showDialog(context: ctx, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
-                                await _startGoogleSignInFlow(dialogContext: ctx);
-                              },
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(minimumSize: const Size.fromHeight(40)),
-                        onPressed: () async {
-                          showDialog(context: ctx, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
-                          try {
-                            await AuthService.instance.signOut();
-                          } catch (_) {}
-                          final prefs = await SharedPreferences.getInstance();
-                          await prefs.remove('google_signed_in');
-                          await prefs.remove('google_displayName');
-                          await prefs.remove('google_email');
-                          await prefs.remove('google_photoUrl');
-                          await prefs.remove('use_google_name');
-
-                          if (!mounted) return;
-                          setState(() {
-                            _googleSignedIn = false;
-                            _googleDisplayName = null;
-                            _googleEmail = null;
-                            _googlePhotoUrl = null;
-                            _useGoogleName = false;
-                            username = prefs.getString('username') ?? 'unamed_carenthusiast';
-                          });
-
-                          Navigator.of(ctx).pop(); // close progress
-                          Navigator.of(ctx).pop(); // close edit dialog
-                        },
-                        child: const Text('Disconnect Google'),
-                      ),
-                    ),
                   ],
+                  // Note: Removed automatic Google sign-in prompt for guests
+                  // Users should sign in from the Welcome page when first using the app
                 ],
               ),
             ),

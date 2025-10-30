@@ -97,16 +97,33 @@ super.dispose();
         // Only Android for now (as requested)
         throw 'Google sign-in is only enabled on Android for now.';
       }
-      final user = await AuthService.instance.signInWithGoogle();
-      if (user == null) {
+
+      final credential = await AuthService.instance.signInWithGoogle();
+      if (credential == null) {
         throw 'Sign-in cancelled.';
       }
+
+      // Get user info from Firebase
+      final user = credential.user;
+
+      // CRITICAL: Persist auth state to SharedPreferences
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('google_signed_in', true);
+      await prefs.setString('google_displayName', user?.displayName ?? '');
+      await prefs.setString('google_email', user?.email ?? '');
+      await prefs.setString('google_photoUrl', user?.photoURL ?? '');
+      await prefs.setBool('use_google_name', true);
+      await prefs.setBool('is_guest', false);
+
       // Mark onboarding done and enter
       await _markOnboardedAndEnter();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.toString())),
+          SnackBar(
+            content: Text('Sign-in failed: ${e.toString()}'),
+            duration: const Duration(seconds: 5),
+          ),
         );
       }
     } finally {

@@ -57,10 +57,14 @@ android {
 
 flutter { source = "../.." }
 
+// Make sure any transitive inclusion of core-common is excluded globally
 configurations {
     all {
         // keep analytics libs out if you want
         exclude(group = "com.google.android.gms", module = "play-services-measurement")
+
+        // Prevent duplicate Play Core classes by excluding core-common wherever it appears transitively
+        exclude(group = "com.google.android.play", module = "core-common")
     }
 }
 
@@ -79,7 +83,6 @@ dependencies {
     implementation("com.google.android.gms:play-services-measurement-api:23.0.0")
     implementation("com.google.android.gms:play-services-measurement-sdk-api:23.0.0")
     
-
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.9.0")
@@ -89,11 +92,12 @@ dependencies {
     implementation("androidx.window:window:1.2.0")
     implementation("androidx.activity:activity-ktx:1.8.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
+
+    // --- Play Core (only core) ---
+    // Keep core but explicitly exclude core-common in case any transitive dependency drags it in
+    implementation("com.google.android.play:core:1.10.3") {
+        exclude(group = "com.google.android.play", module = "core-common")
+    }
 }
 
-// --- Ensure the google-services plugin is applied so google-services.json is processed ---
-// This line applies the plugin that converts google-services.json into res/values/google_services.xml
-// (Make sure your project-level android/build.gradle.kts contains the classpath:
-//   classpath("com.google.gms:google-services:4.3.15")
-// )
 apply(plugin = "com.google.gms.google-services")
