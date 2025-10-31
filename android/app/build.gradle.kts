@@ -92,12 +92,6 @@ dependencies {
     implementation("androidx.window:window:1.2.0")
     implementation("androidx.activity:activity-ktx:1.8.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
-
-    // --- Play Core (only core) ---
-    // Keep core but explicitly exclude core-common in case any transitive dependency drags it in
-    implementation("com.google.android.play:core:1.10.3") {
-        exclude(group = "com.google.android.play", module = "core-common")
-    }
 }
 
 apply(plugin = "com.google.gms.google-services")
