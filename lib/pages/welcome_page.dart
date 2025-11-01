@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/auth_service.dart';
 import '../services/audio_feedback.dart';
+import '../services/analytics_service.dart';
 
 import 'preload_page.dart'; // or your first page (HomePage), keep what you use today
 
@@ -76,12 +77,37 @@ super.dispose();
     if (_busy) return;
     setState(() => _busy = true);
     try {
-      // No auth, just mark onboarding done and go in
+      // Sign in anonymously to Firebase
+      final credential = await AuthService.instance.signInAnonymously();
+      if (credential == null || credential.user == null) {
+        throw 'Failed to create anonymous account.';
+      }
+
+      final user = credential.user!;
+
+      // Persist auth state to SharedPreferences
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('is_guest', true);
+      await prefs.setString('auth_method', 'anonymous');
+      await prefs.setString('firebase_uid', user.uid);
+      await prefs.setBool('google_signed_in', false);
+
+      // Store timestamp for 2-day notification prompt
+      await prefs.setString('anonymous_since', DateTime.now().toIso8601String());
+
+      // Track sign-up in Analytics
+      await AnalyticsService.instance.logSignUp(method: 'anonymous');
+      await AnalyticsService.instance.setUserId(user.uid);
+
+      // Mark onboarding done and enter
       await _markOnboardedAndEnter();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not continue as guest: $e')),
+          SnackBar(
+            content: Text('Could not continue as guest: $e'),
+            duration: const Duration(seconds: 5),
+          ),
         );
       }
     } finally {
@@ -114,6 +140,14 @@ super.dispose();
       await prefs.setString('google_photoUrl', user?.photoURL ?? '');
       await prefs.setBool('use_google_name', true);
       await prefs.setBool('is_guest', false);
+      await prefs.setString('auth_method', 'google');
+      await prefs.setString('firebase_uid', user?.uid ?? '');
+      // Remove anonymous timestamp if exists (user upgraded)
+      await prefs.remove('anonymous_since');
+
+      // Track sign-up in Analytics
+      await AnalyticsService.instance.logSignUp(method: 'google');
+      await AnalyticsService.instance.setUserId(user?.uid);
 
       // Mark onboarding done and enter
       await _markOnboardedAndEnter();

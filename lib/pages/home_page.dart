@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/image_service_cache.dart';
 import '../services/audio_feedback.dart';
 import '../services/ad_service.dart';
+import '../services/analytics_service.dart';
 
 /// Raw track point definitions for tracks 2 & 3.
 final Map<int, List<Offset>> _tracks = {
@@ -464,6 +465,36 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     await prefs.setInt('gearCountBeforeLevel', _gearCountBeforeLevel);
   }
 
+  /// Track gear earning and check for milestones
+  void _trackGearEarned(int previousGearCount, int newGearCount, {String? source}) {
+    final gearsEarned = newGearCount - previousGearCount;
+    if (gearsEarned <= 0) return;
+
+    // Track gears earned event
+    AnalyticsService.instance.logEvent(
+      name: 'gears_earned',
+      parameters: {
+        'gears_earned': gearsEarned,
+        'total_gears': newGearCount,
+        'source': source ?? 'challenge',
+        'track': _currentTrack,
+        'level': _sessionsCompleted + 1,
+      },
+    );
+
+    // Check for gear milestones
+    const milestones = [100, 500, 1000, 5000, 10000];
+    for (final milestone in milestones) {
+      if (previousGearCount < milestone && newGearCount >= milestone) {
+        AnalyticsService.instance.logGearMilestone(
+          milestone: milestone,
+          currentGears: newGearCount,
+        );
+        debugPrint('🎉 Gear milestone reached: $milestone');
+      }
+    }
+  }
+
   Future<void> _onWatchAdToPass(Future<void> Function() onPassAction) async {
     if (_isShowingAdAction) return;
     setState(() => _isShowingAdAction = true);
@@ -905,6 +936,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
             await _saveConsecutiveFails();
             int prevScore = _previousScores[flagIndex] ?? 0;
             int delta = quizScore - prevScore;
+            final previousGearCount = _gearCount;
             _gearCount += delta;
             _previousScores[flagIndex] = quizScore;
 
@@ -921,6 +953,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
             await _saveGearCount();
             widget.onGearUpdate(_gearCount);
+            _trackGearEarned(previousGearCount, _gearCount, source: 'challenge');
             _retryButtonActive = false;
             _animateToNextPoint();
             widget.recordChallengeCompletion?.call();
@@ -950,10 +983,12 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                 final int totalQuestions = questionMethods.length;
                 final int delta = totalQuestions - prevScore;
                 if (delta > 0) {
+                  final previousGearCount = _gearCount;
                   _gearCount += delta;
                   _previousScores[flagIndex] = totalQuestions;
                   await _saveGearCount();
                   widget.onGearUpdate(_gearCount);
+                  _trackGearEarned(previousGearCount, _gearCount, source: 'ad_pass');
                   // count as a completed challenge for daily streaks / history
                   widget.recordChallengeCompletion?.call();
                 }
@@ -987,11 +1022,12 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
             int prevScore = _previousScores[flagIndex] ?? 0;
             int delta = quizScore - prevScore;
+            final previousGearCount = _gearCount;
             _gearCount += delta;
             _previousScores[flagIndex] = quizScore;
             await _saveGearCount();
             widget.onGearUpdate(_gearCount);
-
+            _trackGearEarned(previousGearCount, _gearCount, source: 'final_flag');
 
             await prefs.setStringList('unlockedAchievements', unlocked);
           } else {
@@ -1012,8 +1048,10 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
           // Award missing gears
           int delta = quizScore - prevScore;
+          final previousGearCount = _gearCount;
           _gearCount += delta;
           _previousScores[flagIndex] = quizScore;
+          _trackGearEarned(previousGearCount, _gearCount, source: 'correction_run');
 
           // Update flag color based on new score
           if (quizScore == totalQuestions) {

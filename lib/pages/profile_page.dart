@@ -10,6 +10,8 @@ import '../services/image_service_cache.dart';
 import 'preload_page.dart';
 import '../services/audio_feedback.dart';
 import '../services/auth_service.dart'; // <-- NEW: use singleton AuthService
+import 'package:firebase_auth/firebase_auth.dart';
+import '../services/analytics_service.dart';
 
 class ProfilePage extends StatefulWidget {
   final VoidCallback? onReplayTutorial;
@@ -54,6 +56,7 @@ class _ProfilePageState extends State<ProfilePage> {
 
   // guest detection
   bool _isGuest = false;
+  bool _isAnonymous = false;
 
   // For the edit dialog
   List<String> _brandOptions = [];
@@ -119,6 +122,10 @@ class _ProfilePageState extends State<ProfilePage> {
     try {
       AudioFeedback.instance.playEvent(SoundEvent.pageOpen);
     } catch (_) {}
+
+    // Track screen view
+    AnalyticsService.instance.logProfileViewed();
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkNewAchievement();
     });
@@ -217,6 +224,9 @@ class _ProfilePageState extends State<ProfilePage> {
             storedUsername == 'N/A' ||
             storedUsername.startsWith('unamed'));
 
+    // Check if user is anonymous (Firebase anonymous auth)
+    final isAnonymousDetermined = AuthService.instance.isAnonymous();
+
     // Compute profilePicIndex and createdAt (persist if missing)
     int resolvedPicIndex;
     if (storedPicIndex == null) {
@@ -251,6 +261,7 @@ class _ProfilePageState extends State<ProfilePage> {
       _useGoogleName = useGoogleNamePref;
 
       _isGuest = isGuestDetermined;
+      _isAnonymous = isAnonymousDetermined;
 
       username = resolvedUsername;
       favoriteBrand = storedFavoriteBrand;
@@ -312,7 +323,7 @@ class _ProfilePageState extends State<ProfilePage> {
     // indicator (small badge) showing signed-in status
     final statusChip = _googleSignedIn
         ? Chip(label: Text(_googleEmail ?? 'Google'), avatar: const Icon(Icons.check_circle, size: 16))
-        : (_isGuest ? const Chip(label: Text('Guest')) : const SizedBox.shrink());
+        : (_isAnonymous || _isGuest ? const Chip(label: Text('Guest (Anonymous)')) : const SizedBox.shrink());
 
     return Center(
       child: Column(
@@ -825,6 +836,106 @@ class _ProfilePageState extends State<ProfilePage> {
     );
   }
 
+  // --- NEW: Link anonymous account to Google
+  Future<void> _linkGoogleAccount() async {
+    try {
+      // Show loading
+      if (!mounted) return;
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const Center(child: CircularProgressIndicator()),
+      );
+
+      // Attempt to link
+      final credential = await AuthService.instance.linkGoogleAccount();
+
+      // Close loading
+      if (!mounted) return;
+      Navigator.of(context).pop();
+
+      if (credential == null) {
+        // User cancelled
+        return;
+      }
+
+      final user = credential.user;
+      if (user == null) {
+        throw 'Failed to link account';
+      }
+
+      // Update SharedPreferences
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('google_signed_in', true);
+      await prefs.setString('google_displayName', user.displayName ?? '');
+      await prefs.setString('google_email', user.email ?? '');
+      await prefs.setString('google_photoUrl', user.photoURL ?? '');
+      await prefs.setBool('use_google_name', true);
+      await prefs.setBool('is_guest', false);
+      await prefs.setString('auth_method', 'google');
+      await prefs.setString('firebase_uid', user.uid);
+      await prefs.remove('anonymous_since');
+
+      // Track account linking in Analytics
+      await AnalyticsService.instance.logAccountLinked(
+        fromMethod: 'anonymous',
+        toMethod: 'google',
+      );
+
+      // Update UI state
+      setState(() {
+        _googleSignedIn = true;
+        _googleDisplayName = user.displayName;
+        _googleEmail = user.email;
+        _googlePhotoUrl = user.photoURL;
+        _useGoogleName = true;
+        _isGuest = false;
+        _isAnonymous = false;
+        if (_useGoogleName && (_googleDisplayName?.isNotEmpty ?? false)) {
+          username = _googleDisplayName!;
+        }
+      });
+
+      // Show success message
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('🎉 Account connected! Your progress is now saved to Google.'),
+          duration: Duration(seconds: 4),
+        ),
+      );
+    } on FirebaseAuthException catch (e) {
+      // Close loading if still open
+      if (mounted) Navigator.of(context).pop();
+
+      String errorMessage = 'Failed to connect account: ${e.message}';
+      if (e.code == 'credential-already-in-use' || e.code == 'email-already-in-use') {
+        errorMessage = 'This Google account is already in use. Sign out and sign in with Google to use that account.';
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(errorMessage),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    } catch (e) {
+      // Close loading if still open
+      if (mounted) Navigator.of(context).pop();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error connecting account: $e'),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    }
+  }
+
   // --- NEW: disconnect using AuthService (revoke tokens + sign out)
   Future<void> _disconnectGoogleAccount(BuildContext dialogContext) async {
     // affiche progress
@@ -837,6 +948,9 @@ class _ProfilePageState extends State<ProfilePage> {
     try {
       // Use AuthService to disconnect (it signs out Firebase + Google properly)
       await AuthService.instance.disconnectGoogle();
+
+      // Track sign-out in Analytics
+      await AnalyticsService.instance.logSignOut();
     } catch (_) {
       // ignore
     }
@@ -1074,6 +1188,66 @@ class _ProfilePageState extends State<ProfilePage> {
                   _buildAvatarHeader(memSince),
 
                   const SizedBox(height: 20),
+
+                  // Show "Connect to Google" banner for anonymous users
+                  if (_isAnonymous && !_googleSignedIn) ...[
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(
+                          colors: [Color(0xFF4285F4), Color(0xFF34A853)],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                        ),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Column(
+                        children: [
+                          const Row(
+                            children: [
+                              Icon(Icons.cloud_upload, color: Colors.white, size: 28),
+                              SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  'Connect to Google',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Save your progress and access it from any device',
+                            style: TextStyle(color: Colors.white70, fontSize: 14),
+                          ),
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton(
+                              onPressed: _linkGoogleAccount,
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.white,
+                                foregroundColor: const Color(0xFF4285F4),
+                                padding: const EdgeInsets.symmetric(vertical: 14),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                              ),
+                              child: const Text(
+                                'Connect with Google',
+                                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                  ],
 
                   Text(
                     'Track $_currentTrack, Level ${_sessionsCompleted + 1}, '

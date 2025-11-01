@@ -151,4 +151,118 @@ class AuthService {
       debugPrint('AuthService.signOut error: $e');
     }
   }
+
+  /// Sign in anonymously to Firebase
+  /// Returns the UserCredential with anonymous user
+  Future<UserCredential?> signInAnonymously() async {
+    try {
+      debugPrint('AuthService: Starting Anonymous Sign-In...');
+      final userCredential = await _auth.signInAnonymously();
+      debugPrint('AuthService: SUCCESS! Anonymous user created: ${userCredential.user?.uid}');
+      return userCredential;
+    } on FirebaseAuthException catch (e, stack) {
+      debugPrint('AuthService: FirebaseAuthException during anonymous sign-in - Code: ${e.code}, Message: ${e.message}\n$stack');
+      rethrow;
+    } catch (e, stack) {
+      debugPrint('AuthService: Unknown error during anonymous sign-in: $e\n$stack');
+      rethrow;
+    }
+  }
+
+  /// Check if the current user is anonymous
+  bool isAnonymous() {
+    try {
+      final user = _auth.currentUser;
+      if (user == null) return false;
+      return user.isAnonymous;
+    } catch (e) {
+      debugPrint('AuthService.isAnonymous error: $e');
+      return false;
+    }
+  }
+
+  /// Link anonymous account with Google account
+  /// This preserves the user's UID and upgrades them from anonymous to Google auth
+  /// Returns UserCredential on success, null if user cancels
+  /// Throws FirebaseAuthException if account already exists
+  Future<UserCredential?> linkGoogleAccount() async {
+    try {
+      final currentUser = _auth.currentUser;
+      if (currentUser == null) {
+        throw FirebaseAuthException(
+          code: 'NO_CURRENT_USER',
+          message: 'No user is currently signed in',
+        );
+      }
+
+      if (!currentUser.isAnonymous) {
+        throw FirebaseAuthException(
+          code: 'NOT_ANONYMOUS',
+          message: 'Current user is not anonymous',
+        );
+      }
+
+      if (!_initialized) {
+        await init();
+      }
+
+      debugPrint('AuthService: Linking anonymous account to Google...');
+
+      // Step 1: Trigger Google Sign-In
+      if (!_googleSignIn.supportsAuthenticate()) {
+        throw UnsupportedError('authenticate() not supported on this platform');
+      }
+
+      final GoogleSignInAccount googleUser = await _googleSignIn.authenticate(
+        scopeHint: ['email', 'profile'],
+      );
+
+      debugPrint('AuthService: Got Google user for linking: ${googleUser.email}');
+
+      // Step 2: Get authentication tokens
+      final GoogleSignInAuthentication googleAuth = await googleUser.authentication;
+      final String? idToken = googleAuth.idToken;
+
+      if (idToken == null || idToken.isEmpty) {
+        throw FirebaseAuthException(
+          code: 'NO_ID_TOKEN',
+          message: 'Failed to get idToken from Google Sign-In',
+        );
+      }
+
+      // Step 3: Create Firebase credential
+      final credential = GoogleAuthProvider.credential(
+        idToken: idToken,
+        accessToken: null,
+      );
+
+      // Step 4: Link the credential to the anonymous account
+      debugPrint('AuthService: Linking credential to anonymous account...');
+      final userCredential = await currentUser.linkWithCredential(credential);
+
+      debugPrint('AuthService: SUCCESS! Linked account: ${userCredential.user?.email}, UID preserved: ${userCredential.user?.uid}');
+      return userCredential;
+
+    } on GoogleSignInException catch (e, stack) {
+      debugPrint('AuthService: GoogleSignInException during linking - Code: ${e.code.name}, Message: ${e.description}\n$stack');
+
+      // Return null for user cancellation
+      if (e.code.name == 'cancelled' || e.code.name == 'canceled') {
+        debugPrint('AuthService: User cancelled account linking');
+        return null;
+      }
+      rethrow;
+    } on FirebaseAuthException catch (e, stack) {
+      debugPrint('AuthService: FirebaseAuthException during linking - Code: ${e.code}, Message: ${e.message}\n$stack');
+
+      // Special handling for account-exists error
+      if (e.code == 'credential-already-in-use' || e.code == 'email-already-in-use') {
+        debugPrint('AuthService: Google account already exists elsewhere');
+      }
+      rethrow;
+    } catch (e, stack) {
+      debugPrint('AuthService: Unknown error during account linking: $e\n$stack');
+      rethrow;
+    }
+  }
 }

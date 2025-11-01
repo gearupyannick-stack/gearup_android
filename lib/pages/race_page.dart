@@ -9,6 +9,7 @@ import '../services/audio_feedback.dart';
 import '../services/image_service_cache.dart';
 import '../services/collab_wan_service.dart';
 import '../services/ad_service.dart';
+import '../services/analytics_service.dart';
 
 class RacePage extends StatefulWidget {
   final String? username;
@@ -524,6 +525,19 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     // determine winner (local decision only if server hasn't already declared one)
     final winner = _determineWinner(playersSnapshot);
 
+    // Track race finished
+    final didWin = winner.id == localId || winner.displayName == localName;
+    AnalyticsService.instance.logEvent(
+      name: 'race_finished',
+      parameters: {
+        'track': _activeTrackIndex ?? 0,
+        'score': _quizScore,
+        'is_multiplayer': _currentRoomCode != null ? 'true' : 'false',
+        'won': didWin ? 'true' : 'false',
+        'players_count': playersSnapshot.length,
+      },
+    );
+
     // mark that *we* are ending the race and inform others — include winnerName so receivers can show it
     _raceEndedByServer = true;
 
@@ -566,6 +580,15 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     setState(() {
       _raceStarted = true;
     });
+
+    // Track race started
+    AnalyticsService.instance.logEvent(
+      name: 'race_started',
+      parameters: {
+        'track': _activeTrackIndex ?? 0,
+        'is_multiplayer': _currentRoomCode != null ? 'true' : 'false',
+      },
+    );
 
     // stop any ongoing action first
     try { _carController.stop(); } catch (_) {}

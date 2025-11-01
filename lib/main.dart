@@ -23,6 +23,9 @@ import 'services/firebase_options.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'pages/race_page.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'services/auth_service.dart';
+import 'services/analytics_service.dart';
 
 final GlobalKey<ScaffoldMessengerState> scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
 
@@ -35,6 +38,9 @@ void main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+
+  // Initialize Analytics
+  await AnalyticsService.instance.init();
 
   await SoundManager.instance.init();
   // --------------------------
@@ -60,7 +66,13 @@ void main() async {
     debugPrint('AppCheck activation error: $e\n$st');
   }
 
+  // Sync Firebase Auth state with SharedPreferences
+  await _syncFirebaseAuthState();
+
   final prefs = await SharedPreferences.getInstance();
+
+  // Track app open and set user properties
+  await _trackAppLaunch(prefs);
   final bool areImagesLoaded = prefs.getBool('areImagesLoaded') ?? false;
   final bool shouldPreload = !areImagesLoaded;
 
@@ -72,6 +84,118 @@ void main() async {
     initialLives: savedLives,
     livesStorage: livesStorage,
   ));
+}
+
+/// Syncs Firebase Auth state with SharedPreferences on app startup
+/// Migrates existing guest users to anonymous Firebase auth
+Future<void> _syncFirebaseAuthState() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final currentUser = FirebaseAuth.instance.currentUser;
+
+    if (currentUser != null) {
+      // User is already authenticated in Firebase
+      debugPrint('Firebase Auth: User already signed in: ${currentUser.uid}');
+
+      // Sync SharedPreferences with Firebase state
+      final storedUid = prefs.getString('firebase_uid');
+      if (storedUid != currentUser.uid) {
+        // Update stored UID to match Firebase
+        await prefs.setString('firebase_uid', currentUser.uid);
+        debugPrint('Firebase Auth: Synced UID to SharedPreferences');
+      }
+
+      // Ensure auth_method is set correctly
+      if (currentUser.isAnonymous) {
+        await prefs.setBool('is_guest', true);
+        await prefs.setString('auth_method', 'anonymous');
+      } else {
+        // User is authenticated with Google
+        await prefs.setBool('is_guest', false);
+        await prefs.setString('auth_method', 'google');
+        await prefs.setBool('google_signed_in', true);
+      }
+    } else {
+      // No Firebase user exists
+      debugPrint('Firebase Auth: No user signed in');
+
+      // Check if user has local progress but no Firebase auth (existing guest user)
+      final isOnboarded = prefs.getBool('isOnboarded') ?? false;
+      final isGuest = prefs.getBool('is_guest') ?? false;
+      final gearCount = prefs.getInt('gearCount') ?? 0;
+
+      if (isOnboarded && (isGuest || gearCount > 0)) {
+        // Existing user without Firebase auth - migrate to anonymous
+        debugPrint('Firebase Auth: Migrating existing guest user to anonymous auth');
+        try {
+          final credential = await AuthService.instance.signInAnonymously();
+          if (credential != null && credential.user != null) {
+            await prefs.setBool('is_guest', true);
+            await prefs.setString('auth_method', 'anonymous');
+            await prefs.setString('firebase_uid', credential.user!.uid);
+            await prefs.setString('anonymous_since', DateTime.now().toIso8601String());
+            debugPrint('Firebase Auth: Successfully migrated guest to anonymous: ${credential.user!.uid}');
+          }
+        } catch (e) {
+          debugPrint('Firebase Auth: Failed to migrate guest user: $e');
+          // Continue anyway - user can still use the app
+        }
+      }
+    }
+  } catch (e, stack) {
+    debugPrint('Firebase Auth sync error: $e\n$stack');
+    // Don't block app startup if auth sync fails
+  }
+}
+
+/// Track app launch and update user properties in Analytics
+Future<void> _trackAppLaunch(SharedPreferences prefs) async {
+  try {
+    // Log app open
+    await AnalyticsService.instance.logAppOpen();
+
+    // Check if this is first app open
+    final isFirstOpen = !(prefs.getBool('isOnboarded') ?? false);
+    if (isFirstOpen) {
+      await AnalyticsService.instance.logFirstOpen();
+    }
+
+    // Set user ID from Firebase Auth
+    final firebaseUid = prefs.getString('firebase_uid');
+    if (firebaseUid != null) {
+      await AnalyticsService.instance.setUserId(firebaseUid);
+    }
+
+    // Update user properties
+    final isPremium = prefs.getBool('isPremium') ?? false;
+    final isGuest = prefs.getBool('is_guest') ?? false;
+    final authMethod = prefs.getString('auth_method') ?? 'unknown';
+    final gearCount = prefs.getInt('gearCount') ?? 0;
+    final dayStreak = prefs.getInt('dayStreak') ?? 0;
+
+    // Determine user type
+    String userType = 'free';
+    if (isPremium) {
+      userType = 'premium';
+    } else if (isGuest) {
+      userType = 'guest';
+    }
+
+    // Update all user properties
+    await AnalyticsService.instance.updateUserProperties(
+      userType: userType,
+      totalGears: gearCount,
+      currentTrack: 1, // Default, will be updated as user progresses
+      currentLevel: 1, // Default, will be updated as user progresses
+      dayStreak: dayStreak,
+      authMethod: authMethod,
+    );
+
+    debugPrint('Analytics: App launch tracked successfully');
+  } catch (e) {
+    debugPrint('Analytics: Error tracking app launch: $e');
+    // Don't block app startup if analytics fails
+  }
 }
 
 class CarLearningApp extends StatelessWidget {
@@ -326,7 +450,10 @@ class _MainPageState extends State<MainPage> {
     // 4) other inits
     _loadDayStreak();
     _initializeChallengeStatus();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowTutorial());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _maybeShowTutorial();
+      _maybeShowAnonymousUpgradePrompt();
+    });
   }
 
   /// Apply a granted life: persist, update UI and timers.
@@ -337,6 +464,12 @@ class _MainPageState extends State<MainPage> {
     setState(() {
       lives = (lives + 1).clamp(0, _maxLives);
     });
+
+    // Track life earned
+    AnalyticsService.instance.logLifeEarned(
+      source: 'training', // Default source, can be overridden by caller
+      livesNow: lives,
+    );
 
     // persist via LivesStorage
     await widget.livesStorage.writeLives(lives);
@@ -486,7 +619,7 @@ class _MainPageState extends State<MainPage> {
   }
 
   /// On challenge failure: decrement, persist, start timer if needed,
-  /// then show the 5-star popup if it’s the first time at zero.
+  /// then show the 5-star popup if it's the first time at zero.
   /// Called whenever the user fails a challenge.
   Future<void> _onChallengeFail() async {
     // 1) Decrement & persist
@@ -494,6 +627,12 @@ class _MainPageState extends State<MainPage> {
       if (lives > 0) lives--;
     });
     await widget.livesStorage.writeLives(lives);
+
+    // Track life lost
+    AnalyticsService.instance.logLifeLost(
+      context: 'challenge_fail',
+      livesRemaining: lives,
+    );
 
     // 2) If we’ve dropped below max, schedule the next life *relative to now*
     if (lives < _maxLives) {
@@ -535,6 +674,12 @@ class _MainPageState extends State<MainPage> {
                     await widget.livesStorage.writeLives(lives);
                     final prefs = await SharedPreferences.getInstance();
                     prefs.remove('nextLifeDueTime');
+
+                    // Track life earned from rating
+                    AnalyticsService.instance.logLifeEarned(
+                      source: 'rate_app',
+                      livesNow: lives,
+                    );
 
                     Navigator.of(ctx).pop();
                     final uri = Uri.parse(
@@ -578,6 +723,8 @@ class _MainPageState extends State<MainPage> {
     if (force) {
       // Replay requested from profile: always show, and persist that user has seen it.
       await prefs.setBool('hasSeenTutorial', true);
+      // Track tutorial replay
+      AnalyticsService.instance.logTutorialReplayed();
       WidgetsBinding.instance.addPostFrameCallback((_) => _showTutorial());
       return;
     }
@@ -585,8 +732,138 @@ class _MainPageState extends State<MainPage> {
     // Normal behaviour: if not seen before, mark seen and show once.
     if (!hasSeen) {
       await prefs.setBool('hasSeenTutorial', true);
+      // Track tutorial begin
+      AnalyticsService.instance.logTutorialBegin();
       WidgetsBinding.instance.addPostFrameCallback((_) => _showTutorial());
     }
+  }
+
+  /// Shows a prompt to anonymous users after 2 days to connect their Google account
+  Future<void> _maybeShowAnonymousUpgradePrompt() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      // Check if user is anonymous
+      final authMethod = prefs.getString('auth_method');
+      if (authMethod != 'anonymous') {
+        return; // Not anonymous, skip
+      }
+
+      // Check if already prompted
+      final hasBeenPrompted = prefs.getBool('anonymous_upgrade_prompted') ?? false;
+      if (hasBeenPrompted) {
+        return; // Already prompted, don't show again
+      }
+
+      // Check when user became anonymous
+      final anonymousSinceStr = prefs.getString('anonymous_since');
+      if (anonymousSinceStr == null) {
+        return; // No timestamp, skip
+      }
+
+      final anonymousSince = DateTime.parse(anonymousSinceStr);
+      final now = DateTime.now();
+      final daysSinceAnonymous = now.difference(anonymousSince).inDays;
+
+      // Show prompt after 2 days
+      if (daysSinceAnonymous >= 2) {
+        // Mark as prompted so we don't show again
+        await prefs.setBool('anonymous_upgrade_prompted', true);
+
+        // Show the prompt after a short delay to not interfere with tutorial
+        Future.delayed(const Duration(seconds: 2), () {
+          if (!mounted) return;
+          _showAnonymousUpgradeDialog();
+        });
+      }
+    } catch (e) {
+      debugPrint('Error checking anonymous upgrade prompt: $e');
+    }
+  }
+
+  /// Shows a dialog prompting anonymous users to connect their Google account
+  void _showAnonymousUpgradeDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.cloud_upload, color: Colors.blue, size: 28),
+            SizedBox(width: 12),
+            Expanded(child: Text('Save Your Progress')),
+          ],
+        ),
+        content: const Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'You\'ve been using GearUp for 2 days! 🎉',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+            SizedBox(height: 12),
+            Text(
+              'Connect your Google account to:',
+              style: TextStyle(fontSize: 14),
+            ),
+            SizedBox(height: 8),
+            Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.green, size: 20),
+                SizedBox(width: 8),
+                Expanded(child: Text('Never lose your progress')),
+              ],
+            ),
+            SizedBox(height: 6),
+            Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.green, size: 20),
+                SizedBox(width: 8),
+                Expanded(child: Text('Access from any device')),
+              ],
+            ),
+            SizedBox(height: 6),
+            Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.green, size: 20),
+                SizedBox(width: 8),
+                Expanded(child: Text('Sync your achievements')),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Maybe Later'),
+          ),
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              // Navigate to profile page where they can connect
+              setState(() {
+                _currentIndex = 4; // Profile tab
+              });
+              // Show a snackbar to guide them
+              Future.delayed(const Duration(milliseconds: 500), () {
+                scaffoldMessengerKey.currentState?.showSnackBar(
+                  const SnackBar(
+                    content: Text('Tap the "Connect with Google" button to save your progress'),
+                    duration: Duration(seconds: 4),
+                  ),
+                );
+              });
+            },
+            icon: const Icon(Icons.link),
+            label: const Text('Connect Now'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF4285F4),
+              foregroundColor: Colors.white,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _showTutorial() {
@@ -1043,10 +1320,14 @@ class _MainPageState extends State<MainPage> {
       alignSkip: Alignment(0, skipYOffset),
       showSkipInLastTarget: false,
       paddingFocus: 10,
-      onFinish: () => print("Tutorial finished"),
+      onFinish: () {
+        print("Tutorial finished");
+        AnalyticsService.instance.logTutorialComplete();
+      },
       onClickTarget: (t) => print("Clicked on ${t.identify}"),
       onSkip: () {
         print("Tutorial skipped");
+        AnalyticsService.instance.logTutorialSkip();
         return true;
       },
     );
@@ -1117,6 +1398,9 @@ class _MainPageState extends State<MainPage> {
 
   void _triggerStreakReward(int streak) {
     if ([7, 14, 30, 60, 100].contains(streak)) {
+      // Track streak milestone
+      AnalyticsService.instance.logStreakMilestone(milestone: streak);
+
       scaffoldMessengerKey.currentState?.showSnackBar(
         SnackBar(
           content: Text("🎁 $streak-Day Streak! Bonus awarded!"),
@@ -1170,6 +1454,12 @@ class _MainPageState extends State<MainPage> {
       streakTitle = _getStreakTitle(currentStreak);
     });
 
+    // Track streak update in Analytics
+    AnalyticsService.instance.logStreakUpdated(
+      newStreakCount: currentStreak,
+      streakTitle: streakTitle,
+    );
+
     _triggerStreakReward(currentStreak);
     _playStreakAnimation();
   }
@@ -1202,6 +1492,9 @@ class _MainPageState extends State<MainPage> {
         challengesCompletedToday = true;
       });
 
+      // Track daily goal completed
+      AnalyticsService.instance.logDailyGoalCompleted(challengesCompleted: count);
+
       final completionDays = prefs.getStringList('playHistory') ?? [];
       if (!completionDays.contains(todayStr)) {
         completionDays.add(todayStr);
@@ -1219,6 +1512,9 @@ class _MainPageState extends State<MainPage> {
   Future<void> _showLivesPopup() async {
     // Refresh lives when opening popup
     lives = await widget.livesStorage.readLives();
+
+    // Track lives popup opened
+    AnalyticsService.instance.logLivesPopupOpened(currentLives: lives);
 
     return showDialog(
       context: context,
@@ -1314,6 +1610,9 @@ class _MainPageState extends State<MainPage> {
   }
 
   void _showCalendarPopup() async {
+    // Track calendar viewed
+    AnalyticsService.instance.logCalendarViewed();
+
     final prefs = await SharedPreferences.getInstance();
     final rawJson   = prefs.getString('dailyCounts') ?? '{}';
     final Map<String, dynamic> dailyCounts = json.decode(rawJson);
