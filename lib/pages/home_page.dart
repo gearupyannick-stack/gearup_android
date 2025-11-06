@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:easy_localization/easy_localization.dart';
 import '../services/image_service_cache.dart';
 import '../services/audio_feedback.dart';
 import '../services/ad_service.dart';
@@ -499,7 +500,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     if (_isShowingAdAction) return;
     setState(() => _isShowingAdAction = true);
     final messenger = ScaffoldMessenger.of(context);
-    messenger.showSnackBar(const SnackBar(content: Text('Loading ad...')));
+    messenger.showSnackBar(SnackBar(content: Text('lives.loadingAd'.tr())));
 
     try {
       final shown = await AdService.instance.showRewardedHomePass(
@@ -516,13 +517,13 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       messenger.clearSnackBars();
 
       if (shown) {
-        messenger.showSnackBar(const SnackBar(content: Text('Passed — good luck!')));
+        messenger.showSnackBar(SnackBar(content: Text('home.passedGoodLuck'.tr())));
       } else {
-        messenger.showSnackBar(const SnackBar(content: Text('Ad unavailable — please try again later.')));
+        messenger.showSnackBar(SnackBar(content: Text('lives.adUnavailable'.tr())));
       }
     } catch (e) {
       messenger.clearSnackBars();
-      messenger.showSnackBar(SnackBar(content: Text('Error showing ad: $e')));
+      messenger.showSnackBar(SnackBar(content: Text('home.errorShowingAd'.tr(namedArgs: {'error': e.toString()}))));
       debugPrint('Error in _onWatchAdToPass: $e');
     } finally {
       if (mounted) setState(() => _isShowingAdAction = false);
@@ -533,7 +534,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     await showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Feeling stuck?'),
+        title: Text('home.feelingStuck'.tr()),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -555,7 +556,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                   // call the ad flow, passing the async onPassAction
                   _onWatchAdToPass(onPassAction);
                 },
-                child: const Text('Watch ad to pass'),
+                child: Text('home.watchAdToPass'.tr()),
               ),
             ),
             const SizedBox(height: 8),
@@ -566,7 +567,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                   padding: const EdgeInsets.symmetric(vertical: 14),
                 ),
                 onPressed: () => Navigator.pop(ctx),
-                child: const Text('Close'),
+                child: Text('common.close'.tr()),
               ),
             ),
           ],
@@ -799,7 +800,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   void showAchievementSnackBar(String title) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text("🏆 Achievement Unlocked: $title"),
+        content: Text('home.achievementUnlocked'.tr(namedArgs: {'title': title})),
         duration: Duration(seconds: 2),
         behavior: SnackBarBehavior.floating,
         backgroundColor: Colors.black87,
@@ -823,33 +824,33 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   String _getAchievementTitle(String id) {
     switch (id) {
       case 'first_flag':
-        return 'First Flag';
+        return 'home.achievements.firstFlag'.tr();
       case 'level_complete':
-        return 'Level Complete';
+        return 'home.achievements.levelComplete'.tr();
       case 'mid-track_milestone':
-        return 'Mid‑Track Milestone';
+        return 'home.achievements.midTrackMilestone'.tr();
       case 'track_unlocker_i':
-        return 'Track Unlocker I';
+        return 'home.achievements.trackUnlockerI'.tr();
       case 'track_unlocker_ii':
-        return 'Track Unlocker II';
+        return 'home.achievements.trackUnlockerII'.tr();
       case 'clean_slate':
-        return 'Clean Slate';
+        return 'home.achievements.cleanSlate'.tr();
       case 'zero-life_loss':
-        return 'Zero‑Life Loss';
+        return 'home.achievements.zeroLifeLoss'.tr();
       case 'swift_racer':
-        return 'Swift Racer';
+        return 'home.achievements.swiftRacer'.tr();
       case 'gear_rookie':
-        return 'Gear Rookie';
+        return 'home.achievements.gearRookie'.tr();
       case 'gear_grinder':
-        return 'Gear Grinder';
+        return 'home.achievements.gearGrinder'.tr();
       case 'gear_tycoon':
-        return 'Gear Tycoon';
+        return 'home.achievements.gearTycoon'.tr();
       case 'second_chance':
-        return 'Second Chance';
+        return 'home.achievements.secondChance'.tr();
       case 'perseverance':
-        return 'Perseverance';
+        return 'home.achievements.perseverance'.tr();
       case 'track_conqueror':
-        return 'Track Conqueror';
+        return 'home.achievements.trackConqueror'.tr();
       default:
         return id;
     }
@@ -1575,7 +1576,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       context: context,
       builder: (context) {
         return AlertDialog(
-          title: Text("Tracks"),
+          title: Text('home.tracks'.tr()),
           content: SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
@@ -1589,7 +1590,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
           actions: [
             TextButton(
               onPressed: () { Navigator.of(context).pop(); },
-              child: Text("Close"),
+              child: Text('common.close'.tr()),
             )
           ],
         );
@@ -1658,7 +1659,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text("Level $level - Required: $requiredGears gears", style: TextStyle(fontSize: 12)),
+                            Text('home.levelRequired'.tr(namedArgs: {'level': level.toString(), 'gears': requiredGears.toString()}), style: const TextStyle(fontSize: 12)),
                             SizedBox(height: 2),
                             LinearProgressIndicator(
                               value: progress,
@@ -1919,7 +1920,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
                           _animateToNextPoint();
                         },
-                        child: Text("Next Track"),
+                        child: Text('home.nextTrack'.tr()),
                       ),
                     );
                   }
@@ -1948,7 +1949,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                             _animateToNextPoint();
                           });
                         },
-                        child: Text("Next Level"),
+                        child: Text('home.nextLevel'.tr()),
                       ),
                     );
                   }
@@ -1965,7 +1966,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                           });
                           _correctMistakes();
                         },
-                        child: Text("Retry"),
+                        child: Text('home.retry'.tr()),
                       ),
                     );
                   }
@@ -1988,7 +1989,7 @@ class _QuestionPage extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false, // disables back arrow
-        title: Text("Flag Challenge"),    // or any title you use
+        title: Text('home.flagChallenge'.tr()),
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),

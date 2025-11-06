@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'dart:convert';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:easy_localization/easy_localization.dart';
 import '../services/audio_feedback.dart';
 import '../services/image_service_cache.dart';
 import '../services/collab_wan_service.dart';
@@ -180,81 +181,20 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       return a.errors.compareTo(b.errors);
     });
 
+    final localId = _collab.localPlayerId;
+    final localName = _nameController.text.trim();
+    final bool localWon = winner.id == localId || winner.displayName == localName;
+
     await showDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (context) {
-        return AlertDialog(
-          title: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('Race finished!'),
-              const SizedBox(height: 6),
-              Text('Winner: ${winner.displayName}', style: const TextStyle(fontWeight: FontWeight.bold)),
-            ],
-          ),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // header row
-                Row(
-                  children: const [
-                    Expanded(child: Text('Player', style: TextStyle(fontWeight: FontWeight.bold))),
-                    SizedBox(width: 8),
-                    Text('Score', style: TextStyle(fontWeight: FontWeight.bold)),
-                    SizedBox(width: 12),
-                    Text('Err', style: TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Flexible(
-                  child: ListView.separated(
-                    shrinkWrap: true,
-                    itemCount: displayList.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 6),
-                    itemBuilder: (context, i) {
-                      final p = displayList[i];
-                      final isWinner = p.id == winner.id || p.displayName == winner.displayName;
-                      final isLocal = p.id == _collab.localPlayerId || p.displayName == _nameController.text.trim();
-                      return Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
-                        decoration: BoxDecoration(
-                          color: isWinner ? Colors.green[800] : Colors.grey[900],
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                p.displayName.isNotEmpty ? p.displayName : (isLocal ? 'You' : 'Player'),
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: isWinner ? FontWeight.w700 : FontWeight.w600,
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Text('${p.score}', style: const TextStyle(color: Colors.white)),
-                            const SizedBox(width: 12),
-                            Text('${p.errors}', style: const TextStyle(color: Colors.white)),
-                          ],
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('OK'),
-            ),
-          ],
+        return _RaceResultDialogContent(
+          displayList: displayList,
+          winner: winner,
+          localId: localId,
+          localName: localName,
+          localWon: localWon,
         );
       },
     );
@@ -401,7 +341,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
-                content: Text('You lost — Winner: ${winner.displayName}'),
+                content: Text('race.youLose'.tr() + ' — ' + 'race.winner'.tr(namedArgs: {'name': winner.displayName})),
                 duration: const Duration(seconds: 2),
               ),
             );
@@ -577,16 +517,20 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   void _startCar() {
     if (!mounted) return;
 
-    setState(() {
-      _raceStarted = true;
-    });
+    // CRITICAL FIX: Guard against premature finish - only start final animation if all questions are completed
+    final totalSlots = _quizSelectedIndices.length;
+    if (totalSlots > 0 && _quizCurrentPos < totalSlots) {
+      debugPrint('_startCar: Cannot start final animation - questions not complete ($_quizCurrentPos / $totalSlots)');
+      return;
+    }
 
-    // Track race started
+    // Track race started (final animation)
     AnalyticsService.instance.logEvent(
-      name: 'race_started',
+      name: 'race_final_animation',
       parameters: {
         'track': _activeTrackIndex ?? 0,
         'is_multiplayer': _currentRoomCode != null ? 'true' : 'false',
+        'score': _quizScore,
       },
     );
 
@@ -732,7 +676,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         final v = c.trim();
         if (v.isEmpty) continue;
         // don't treat the placeholder as a real name (case-insensitive)
-        if (v.toLowerCase() == 'unamed_carenthusiast') continue;
+        if (v.toLowerCase() == 'unnamed_carenthusiast') continue;
         return v;
       }
     } catch (e) {
@@ -1158,9 +1102,9 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         await showDialog(
           context: context,
           builder: (_) => AlertDialog(
-            title: const Text('No data'),
-            content: const Text('No car data available for the quiz.'),
-            actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('OK'))],
+            title: Text('common.error'.tr()),
+            content: Text('race.noCarData'.tr()),
+            actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: Text('common.ok'.tr()))],
           ),
         );
         return;
@@ -1228,17 +1172,18 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
     // reset animation controller to start of lap
     _carController.stop();
+    _carController.reset();
     _carController.value = 0.0;
-    setState(() {
-      _raceStarted = true;
-    });
+
+    // DON'T set _raceStarted = true here - it will be set after first question is shown
+    // This prevents the "immediate win" bug
 
     // ask first question (this will chain the rest)
     await _askNextQuestion();
   }
 
   Future<void> _joinPrivateGame(int index, String displayName, String roomCode, {bool isCreator = false}) async {
-    // Mark UI state (local)
+    // Mark UI state (local) - CRITICAL FIX: Reset ALL state flags to prevent rejoin bugs
     setState(() {
       _activeTrackIndex = index;
       _inPublicRaceView = true;
@@ -1251,6 +1196,11 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       _cumLengths = [];
       _totalPathLength = 0.0;
       _raceAborted = false;
+      _waitingForNextQuestion = false;
+      // CRITICAL: Reset these flags to prevent "already ended" bugs on rejoin
+      _raceEndedByServer = false;
+      _handlingEndRace = false;
+      _roomCreatorId = null;
     });
     _carController.stop();
     _carController.reset();
@@ -1414,7 +1364,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       _currentRoomCode = null;
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Unable to join private room: $e')),
+          SnackBar(content: Text('race.unableToJoinRoom'.tr(namedArgs: {'error': e.toString()}))),
         );
       }
     }
@@ -1448,12 +1398,15 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                       "You're about to enter a private multiplayer game.\n\n"
                       "You will need to answer $qCount questions correctly to complete the lap.\n\n"
                       "Choose your player name:",
+                      style: const TextStyle(color: Colors.white70),
                     ),
                     const SizedBox(height: 8),
                     TextField(
                       controller: _nameController,
+                      style: const TextStyle(color: Colors.white70),
                       decoration: InputDecoration(
                         hintText: 'Enter your name',
+                        hintStyle: const TextStyle(color: Colors.white38),
                         contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
@@ -1478,14 +1431,16 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                         FocusScope.of(context).unfocus();
                         _joinPrivateGame(index, playerName, roomCode, isCreator: true);
                       },
-                      child: const Text('Create Room'),
+                      child: Text('race.createRoom'.tr()),
                     ),
                     const SizedBox(height: 8),
                     // Join Room Section
                     TextField(
                       controller: roomCodeController,
+                      style: const TextStyle(color: Colors.white70),
                       decoration: InputDecoration(
-                        hintText: 'Enter room code',
+                        hintText: 'race.enterRoomCode'.tr(),
+                        hintStyle: const TextStyle(color: Colors.white38),
                         contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(8),
@@ -1499,7 +1454,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
               actions: [
                 TextButton(
                   onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('Cancel'),
+                  child: Text('common.cancel'.tr()),
                 ),
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(
@@ -1512,7 +1467,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                     final roomCode = roomCodeController.text.trim();
                     if (roomCode.isEmpty) {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Please enter a room code.')),
+                        SnackBar(content: Text('race.enterRoomCode'.tr())),
                       );
                       return;
                     }
@@ -1521,7 +1476,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                     Navigator.of(context).pop();
                     _joinPrivateGame(index, playerName, roomCode, isCreator: false);
                   },
-                  child: const Text('Join Room'),
+                  child: Text('race.joinRoom'.tr()),
                 ),
               ],
             );
@@ -1584,6 +1539,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
       // Ask the question (this pushes the question page and waits for pop).
       bool correct = false;
+      final bool isFirstQuestion = (_quizCurrentPos == 0);
       try {
         correct = await handler(
           _quizCurrentPos + 1,
@@ -1595,6 +1551,21 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         debugPrint('Question handler for index $qIndex threw: $e\n$st');
         // Treat as incorrect and allow user to continue rather than crashing the whole page.
         correct = false;
+      }
+
+      // CRITICAL FIX: Set _raceStarted = true AFTER first question is shown (not before)
+      if (isFirstQuestion && !_raceStarted) {
+        setState(() {
+          _raceStarted = true;
+        });
+        // Track race started now that first question has been shown
+        AnalyticsService.instance.logEvent(
+          name: 'race_started',
+          parameters: {
+            'track': _activeTrackIndex ?? 0,
+            'is_multiplayer': _currentRoomCode != null ? 'true' : 'false',
+          },
+        );
       }
 
       // Stop if user left during question
@@ -2047,17 +2018,20 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
               Text(
                 "You're about to enter a multiplayer game.\n\n"
                 "You will need to answer $qCount questions correctly to complete the lap. Difficulty progresses from easy to hard.",
+                style: const TextStyle(color: Colors.white70),
               ),
               const SizedBox(height: 16),
               const Text(
                 "Choose your player name:",
-                style: TextStyle(fontWeight: FontWeight.bold),
+                style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white70),
               ),
               const SizedBox(height: 8),
               TextField(
                 controller: _nameController,
+                style: const TextStyle(color: Colors.white70),
                 decoration: InputDecoration(
                   hintText: 'Enter your name',
+                  hintStyle: const TextStyle(color: Colors.white38),
                   contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                 ),
@@ -2066,7 +2040,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
           ),
           actionsPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           actions: [
-            TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
+            TextButton(onPressed: () => Navigator.of(context).pop(), child: Text('common.cancel'.tr())),
             ElevatedButton(
               style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
               onPressed: () {
@@ -2081,7 +2055,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                   _joinPublicGame(index, playerName, roomCodeOverride: roomCodeOverride);
                 });
               },
-              child: const Text('Join'),
+              child: Text('race.join'.tr()),
             ),
           ],
         );
@@ -2200,7 +2174,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   }
 
   Future<void> _joinPublicGame(int index, String displayName, {String? roomCodeOverride}) async {
-    // Mark UI state (local)
+    // Mark UI state (local) - CRITICAL FIX: Reset ALL state flags to prevent rejoin bugs
     setState(() {
       _activeTrackIndex = index;
       _inPublicRaceView = true;
@@ -2213,6 +2187,11 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       _cumLengths = [];
       _totalPathLength = 0.0;
       _raceAborted = false;
+      _waitingForNextQuestion = false;
+      // CRITICAL: Reset these flags to prevent "already ended" bugs on rejoin
+      _raceEndedByServer = false;
+      _handlingEndRace = false;
+      _roomCreatorId = null;
     });
 
     _carController.stop();
@@ -2234,7 +2213,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
       // Subscribe to players list
       _playersSub?.cancel();
-      _playersSub = _collab.playersStream(roomCode).listen((players) {
+      _playersSub = _collab.playersStream(roomCode).listen((players) async {
         if (!mounted) return;
         // Merge incoming players with existing ones to preserve score/errors
         setState(() {
@@ -2254,9 +2233,10 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         });
 
         // Auto-start if 2+ players and not already started
+        // CRITICAL FIX: Add await to prevent race condition where _startQuizRace is called multiple times
         if (!_raceStarted && players.length >= 2) {
           debugPrint('Starting race with ${players.length} players!');
-          _startQuizRace();
+          await _startQuizRace();
         }
       });
 
@@ -2380,7 +2360,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       _currentRoomCode = null;
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Unable to join multiplayer room: $e')),
+          SnackBar(content: Text('race.unableToJoinRoom'.tr(namedArgs: {'error': e.toString()}))),
         );
       }
     }
@@ -2704,11 +2684,19 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                           _quizScore = 0;
                           _currentDistance = 0.0;
                           _waitingForNextQuestion = false;
+                          // CRITICAL FIX: Reset ALL state flags when leaving
+                          _pathPoints = [];
+                          _cumLengths = [];
+                          _totalPathLength = 0.0;
+                          _raceAborted = false;
+                          _raceEndedByServer = false;
+                          _handlingEndRace = false;
+                          _roomCreatorId = null;
                         });
                       },
-                      child: const Text(
-                        'Leave',
-                        style: TextStyle(color: Colors.white, fontSize: 14),
+                      child: Text(
+                        'race.leave'.tr(),
+                        style: const TextStyle(color: Colors.white, fontSize: 14),
                       ),
                     ),
                   ),
@@ -2868,20 +2856,20 @@ class _QuestionPage extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false,
-        title: const Text("Flag Challenge"),
+        title: Text('home.flagChallenge'.tr()),
         actions: [
           IconButton(
-            tooltip: 'Leave race',
+            tooltip: 'race.leave'.tr(),
             icon: const Icon(Icons.exit_to_app),
             onPressed: () async {
               final confirm = await showDialog<bool>(
                 context: context,
                 builder: (ctx) => AlertDialog(
-                  title: const Text('Leave race'),
-                  content: const Text('Are you sure you want to leave the race? Your progress will be lost.'),
+                  title: Text('race.leave'.tr() + ' ' + 'race.title'.tr()),
+                  content: Text('Are you sure you want to leave the race? Your progress will be lost.'),
                   actions: [
-                    TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
-                    TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Leave')),
+                    TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text('common.cancel'.tr())),
+                    TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text('race.leave'.tr())),
                   ],
                 ),
               );
@@ -3191,11 +3179,56 @@ class _DescriptionSlideshowQuestionContentState
     extends State<_DescriptionSlideshowQuestionContent> with AudioAnswerMixin {
   bool _answered = false;
   String? _selectedDescription;
+  int _frameIndex = 0;
+  Timer? _frameTimer;
+  static const int _maxFrames = 6;
+
+  @override
+  void initState() {
+    super.initState();
+    try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
+    _startFrameTimer();
+  }
+
+  void _startFrameTimer() {
+    _frameTimer?.cancel();
+    _frameTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted && !_answered) {
+        setState(() {
+          _frameIndex = (_frameIndex + 1) % _maxFrames;
+        });
+      }
+    });
+  }
+
+  void _goToNextFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex + 1) % _maxFrames;
+    });
+    _startFrameTimer();
+  }
+
+  void _goToPreviousFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex - 1 + _maxFrames) % _maxFrames;
+    });
+    _startFrameTimer();
+  }
+
+  @override
+  void dispose() {
+    _frameTimer?.cancel();
+    try { AudioFeedback.instance.playEvent(SoundEvent.pageClose); } catch (_) {}
+    super.dispose();
+  }
 
   void _onTap(String description) {
     if (_answered) return;
 
     _audioPlayTap();
+    _frameTimer?.cancel();
 
     final bool correct = description == widget.correctDescription;
 
@@ -3246,22 +3279,65 @@ class _DescriptionSlideshowQuestionContentState
           ),
           const SizedBox(height: 20),
 
-          // ── Six static frames ────────────────────────────────────
-          for (int i = 0; i < 6; i++)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4.0),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: Image(
-                  image: ImageCacheService.instance
-                      .imageProvider('${widget.fileBase}$i.webp'),
-                  height: 200,
-                  width: double.infinity,
-                  fit: BoxFit.cover,
+          // ── Single animated frame with controls ─────────────────
+          ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 500),
+              transitionBuilder: (child, anim) =>
+                  FadeTransition(opacity: anim, child: child),
+              child: Image(
+                key: ValueKey<int>(_frameIndex),
+                image: ImageCacheService.instance
+                    .imageProvider('${widget.fileBase}$_frameIndex.webp'),
+                height: 200,
+                width: double.infinity,
+                fit: BoxFit.cover,
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          // Manual frame controls
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.arrow_back_ios, size: 20),
+                onPressed: _answered ? null : _goToPreviousFrame,
+                color: Colors.white70,
+              ),
+              Text(
+                '${_frameIndex + 1}/$_maxFrames',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              IconButton(
+                icon: const Icon(Icons.arrow_forward_ios, size: 20),
+                onPressed: _answered ? null : _goToNextFrame,
+                color: Colors.white70,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+
+          // Dot indicators
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(_maxFrames, (index) =>
+              Container(
+                margin: const EdgeInsets.symmetric(horizontal: 4),
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _frameIndex == index
+                    ? Colors.red
+                    : Colors.grey.withOpacity(0.4),
                 ),
               ),
             ),
-          const SizedBox(height: 24),
+          ),
+          const SizedBox(height: 16),
 
           // ── Description buttons ──────────────────────────────────
           for (var desc in widget.options)
@@ -3328,19 +3404,47 @@ class _HorsepowerQuestionContentState
   int _frameIndex = 0;
   bool _answered = false;
   String? _selectedAnswer;
+  Timer? _frameTimer;
+  static const int _maxFrames = 6;
 
   @override
   void initState() {
     super.initState();
-    // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
-    // Cycle frames every 2 seconds
+    _startFrameTimer();
+  }
+
+  void _startFrameTimer() {
+    _frameTimer?.cancel();
+    _frameTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted && !_answered) {
+        setState(() {
+          _frameIndex = (_frameIndex + 1) % _maxFrames;
+        });
+      }
+    });
+  }
+
+  void _goToNextFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex + 1) % _maxFrames;
+    });
+    _startFrameTimer(); // Reset auto-cycle timer
+  }
+
+  void _goToPreviousFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex - 1 + _maxFrames) % _maxFrames;
+    });
+    _startFrameTimer(); // Reset auto-cycle timer
   }
 
   @override
   void dispose() {
+    _frameTimer?.cancel();
     try { AudioFeedback.instance.playEvent(SoundEvent.pageClose); } catch (_) {}
-    // Si CETTE classe a des contrôleurs, dispose-les ici (sinon ne mets rien).
     super.dispose();
   }
 
@@ -3348,6 +3452,7 @@ class _HorsepowerQuestionContentState
     if (_answered) return;
 
     _audioPlayTap();
+    _frameTimer?.cancel(); // Stop auto-cycling when answer selected
 
     final bool correct = answer == widget.correctAnswer;
 
@@ -3412,7 +3517,48 @@ class _HorsepowerQuestionContentState
               ),
             ),
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 12),
+
+          // Manual frame controls with counter
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.arrow_back_ios, size: 20),
+                onPressed: _answered ? null : _goToPreviousFrame,
+                color: Colors.white70,
+              ),
+              Text(
+                '${_frameIndex + 1}/$_maxFrames',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              IconButton(
+                icon: const Icon(Icons.arrow_forward_ios, size: 20),
+                onPressed: _answered ? null : _goToNextFrame,
+                color: Colors.white70,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+
+          // Dot indicators
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(_maxFrames, (index) =>
+              Container(
+                margin: const EdgeInsets.symmetric(horizontal: 4),
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _frameIndex == index
+                    ? Colors.red
+                    : Colors.grey.withOpacity(0.4),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
 
           // Horsepower option buttons
           for (var opt in widget.options)
@@ -3486,19 +3632,47 @@ class _AccelerationQuestionContentState
   int _frameIndex = 0;
   bool _answered = false;
   String? _selectedAnswer;
+  Timer? _frameTimer;
+  static const int _maxFrames = 6;
 
   @override
   void initState() {
     super.initState();
-    // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
-    // Cycle the image every 2 seconds
+    _startFrameTimer();
+  }
+
+  void _startFrameTimer() {
+    _frameTimer?.cancel();
+    _frameTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted && !_answered) {
+        setState(() {
+          _frameIndex = (_frameIndex + 1) % _maxFrames;
+        });
+      }
+    });
+  }
+
+  void _goToNextFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex + 1) % _maxFrames;
+    });
+    _startFrameTimer();
+  }
+
+  void _goToPreviousFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex - 1 + _maxFrames) % _maxFrames;
+    });
+    _startFrameTimer();
   }
 
   @override
   void dispose() {
+    _frameTimer?.cancel();
     try { AudioFeedback.instance.playEvent(SoundEvent.pageClose); } catch (_) {}
-    // Si CETTE classe a des contrôleurs, dispose-les ici (sinon ne mets rien).
     super.dispose();
   }
 
@@ -3506,6 +3680,7 @@ class _AccelerationQuestionContentState
     if (_answered) return;
 
     _audioPlayTap();
+    _frameTimer?.cancel();
 
     final bool correct = answer == widget.correctAcceleration;
 
@@ -3572,8 +3747,48 @@ class _AccelerationQuestionContentState
               ),
             ),
           ),
+          const SizedBox(height: 12),
 
-          const SizedBox(height: 24),
+          // Manual frame controls
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.arrow_back_ios, size: 20),
+                onPressed: _answered ? null : _goToPreviousFrame,
+                color: Colors.white70,
+              ),
+              Text(
+                '${_frameIndex + 1}/$_maxFrames',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              IconButton(
+                icon: const Icon(Icons.arrow_forward_ios, size: 20),
+                onPressed: _answered ? null : _goToNextFrame,
+                color: Colors.white70,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+
+          // Dot indicators
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(_maxFrames, (index) =>
+              Container(
+                margin: const EdgeInsets.symmetric(horizontal: 4),
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _frameIndex == index
+                    ? Colors.red
+                    : Colors.grey.withOpacity(0.4),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
 
           // Acceleration option buttons
           for (var opt in widget.options)
@@ -3647,19 +3862,47 @@ class _MaxSpeedQuestionContentState
   int _frameIndex = 0;
   bool _answered = false;
   String? _selectedSpeed;
+  Timer? _frameTimer;
+  static const int _maxFrames = 6;
 
   @override
   void initState() {
     super.initState();
-    // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
-    // Cycle frames every 2 seconds
+    _startFrameTimer();
+  }
+
+  void _startFrameTimer() {
+    _frameTimer?.cancel();
+    _frameTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted && !_answered) {
+        setState(() {
+          _frameIndex = (_frameIndex + 1) % _maxFrames;
+        });
+      }
+    });
+  }
+
+  void _goToNextFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex + 1) % _maxFrames;
+    });
+    _startFrameTimer();
+  }
+
+  void _goToPreviousFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex - 1 + _maxFrames) % _maxFrames;
+    });
+    _startFrameTimer();
   }
 
   @override
   void dispose() {
+    _frameTimer?.cancel();
     try { AudioFeedback.instance.playEvent(SoundEvent.pageClose); } catch (_) {}
-    // Si CETTE classe a des contrôleurs, dispose-les ici (sinon ne mets rien).
     super.dispose();
   }
 
@@ -3667,6 +3910,7 @@ class _MaxSpeedQuestionContentState
     if (_answered) return;
 
     _audioPlayTap();
+    _frameTimer?.cancel(); // Stop auto-cycling when answer selected
 
     final bool correct = speed == widget.correctSpeed;
 
@@ -3733,8 +3977,48 @@ class _MaxSpeedQuestionContentState
               ),
             ),
           ),
+          const SizedBox(height: 12),
 
-          const SizedBox(height: 24),
+          // Manual frame controls
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.arrow_back_ios, size: 20),
+                onPressed: _answered ? null : _goToPreviousFrame,
+                color: Colors.white70,
+              ),
+              Text(
+                '${_frameIndex + 1}/$_maxFrames',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              IconButton(
+                icon: const Icon(Icons.arrow_forward_ios, size: 20),
+                onPressed: _answered ? null : _goToNextFrame,
+                color: Colors.white70,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+
+          // Dot indicators
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(_maxFrames, (index) =>
+              Container(
+                margin: const EdgeInsets.symmetric(horizontal: 4),
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _frameIndex == index
+                    ? Colors.red
+                    : Colors.grey.withOpacity(0.4),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
 
           // Speed option buttons
           for (var opt in widget.options)
@@ -3807,19 +4091,47 @@ class _SpecialFeatureQuestionContentState
   int _frameIndex = 0;
   bool _answered = false;
   String? _selectedFeature;
+  Timer? _frameTimer;
+  static const int _maxFrames = 6;
 
   @override
   void initState() {
     super.initState();
-    // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
-    // Cycle the image every 2 seconds
+    _startFrameTimer();
+  }
+
+  void _startFrameTimer() {
+    _frameTimer?.cancel();
+    _frameTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted && !_answered) {
+        setState(() {
+          _frameIndex = (_frameIndex + 1) % _maxFrames;
+        });
+      }
+    });
+  }
+
+  void _goToNextFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex + 1) % _maxFrames;
+    });
+    _startFrameTimer();
+  }
+
+  void _goToPreviousFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex - 1 + _maxFrames) % _maxFrames;
+    });
+    _startFrameTimer();
   }
 
   @override
   void dispose() {
+    _frameTimer?.cancel();
     try { AudioFeedback.instance.playEvent(SoundEvent.pageClose); } catch (_) {}
-    // Si CETTE classe a des contrôleurs, dispose-les ici (sinon ne mets rien).
     super.dispose();
   }
 
@@ -3827,6 +4139,7 @@ class _SpecialFeatureQuestionContentState
     if (_answered) return;
 
     _audioPlayTap();
+    _frameTimer?.cancel();
 
     final bool correct = feature == widget.correctFeature;
 
@@ -3893,7 +4206,48 @@ class _SpecialFeatureQuestionContentState
               ),
             ),
           ),
-          const SizedBox(height: 24),
+          const SizedBox(height: 12),
+
+          // Manual frame controls
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.arrow_back_ios, size: 20),
+                onPressed: _answered ? null : _goToPreviousFrame,
+                color: Colors.white70,
+              ),
+              Text(
+                '${_frameIndex + 1}/$_maxFrames',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              IconButton(
+                icon: const Icon(Icons.arrow_forward_ios, size: 20),
+                onPressed: _answered ? null : _goToNextFrame,
+                color: Colors.white70,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+
+          // Dot indicators
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(_maxFrames, (index) =>
+              Container(
+                margin: const EdgeInsets.symmetric(horizontal: 4),
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _frameIndex == index
+                    ? Colors.red
+                    : Colors.grey.withOpacity(0.4),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
 
           // Option buttons
           for (var opt in widget.options)
@@ -4274,19 +4628,47 @@ class _OriginCountryQuestionContentState
   int _frameIndex = 0;
   bool _answered = false;
   String? _selectedOrigin;
+  Timer? _frameTimer;
+  static const int _maxFrames = 6;
 
   @override
   void initState() {
     super.initState();
-    // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
-    // Cycle frames every 2 seconds
+    _startFrameTimer();
+  }
+
+  void _startFrameTimer() {
+    _frameTimer?.cancel();
+    _frameTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted && !_answered) {
+        setState(() {
+          _frameIndex = (_frameIndex + 1) % _maxFrames;
+        });
+      }
+    });
+  }
+
+  void _goToNextFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex + 1) % _maxFrames;
+    });
+    _startFrameTimer();
+  }
+
+  void _goToPreviousFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex - 1 + _maxFrames) % _maxFrames;
+    });
+    _startFrameTimer();
   }
 
   @override
   void dispose() {
+    _frameTimer?.cancel();
     try { AudioFeedback.instance.playEvent(SoundEvent.pageClose); } catch (_) {}
-    // Si CETTE classe a des contrôleurs, dispose-les ici (sinon ne mets rien).
     super.dispose();
   }
 
@@ -4294,6 +4676,7 @@ class _OriginCountryQuestionContentState
     if (_answered) return;
 
     _audioPlayTap();
+    _frameTimer?.cancel();
 
     final bool correct = origin == widget.origin;
 
@@ -4360,8 +4743,48 @@ class _OriginCountryQuestionContentState
               ),
             ),
           ),
+          const SizedBox(height: 12),
 
-          const SizedBox(height: 24),
+          // Manual frame controls
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.arrow_back_ios, size: 20),
+                onPressed: _answered ? null : _goToPreviousFrame,
+                color: Colors.white70,
+              ),
+              Text(
+                '${_frameIndex + 1}/$_maxFrames',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              IconButton(
+                icon: const Icon(Icons.arrow_forward_ios, size: 20),
+                onPressed: _answered ? null : _goToNextFrame,
+                color: Colors.white70,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+
+          // Dot indicators
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(_maxFrames, (index) =>
+              Container(
+                margin: const EdgeInsets.symmetric(horizontal: 4),
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _frameIndex == index
+                    ? Colors.red
+                    : Colors.grey.withOpacity(0.4),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
 
           // Country choice buttons
           for (var opt in widget.options)
@@ -4431,19 +4854,47 @@ class _ModelOnlyImageQuestionContentState
   int _frameIndex = 0;
   bool _answered = false;
   String? _selectedModel;
+  Timer? _frameTimer;
+  static const int _maxFrames = 6;
 
   @override
   void initState() {
     super.initState();
-    // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
-    // Alterner les frames toutes les 2 secondes
+    _startFrameTimer();
+  }
+
+  void _startFrameTimer() {
+    _frameTimer?.cancel();
+    _frameTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted && !_answered) {
+        setState(() {
+          _frameIndex = (_frameIndex + 1) % _maxFrames;
+        });
+      }
+    });
+  }
+
+  void _goToNextFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex + 1) % _maxFrames;
+    });
+    _startFrameTimer();
+  }
+
+  void _goToPreviousFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex - 1 + _maxFrames) % _maxFrames;
+    });
+    _startFrameTimer();
   }
 
   @override
   void dispose() {
+    _frameTimer?.cancel();
     try { AudioFeedback.instance.playEvent(SoundEvent.pageClose); } catch (_) {}
-    // Si CETTE classe a des contrôleurs, dispose-les ici (sinon ne mets rien).
     super.dispose();
   }
 
@@ -4451,6 +4902,7 @@ class _ModelOnlyImageQuestionContentState
     if (_answered) return;
 
     _audioPlayTap();
+    _frameTimer?.cancel();
 
     final bool correct = model == widget.correctModel;
 
@@ -4511,8 +4963,48 @@ class _ModelOnlyImageQuestionContentState
               fit: BoxFit.cover,
             ),
           ),
+          const SizedBox(height: 12),
 
-          const SizedBox(height: 24),
+          // Manual frame controls
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.arrow_back_ios, size: 20),
+                onPressed: _answered ? null : _goToPreviousFrame,
+                color: Colors.white70,
+              ),
+              Text(
+                '${_frameIndex + 1}/$_maxFrames',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              IconButton(
+                icon: const Icon(Icons.arrow_forward_ios, size: 20),
+                onPressed: _answered ? null : _goToNextFrame,
+                color: Colors.white70,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+
+          // Dot indicators
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(_maxFrames, (index) =>
+              Container(
+                margin: const EdgeInsets.symmetric(horizontal: 4),
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _frameIndex == index
+                    ? Colors.red
+                    : Colors.grey.withOpacity(0.4),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
 
           // Boutons modèles
           for (var m in widget.options)
@@ -4690,6 +5182,378 @@ class _RandomCarImageQuestionContentState
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+// Animated Race Result Dialog Widget
+class _RaceResultDialogContent extends StatefulWidget {
+  final List<PlayerInfo> displayList;
+  final PlayerInfo winner;
+  final String localId;
+  final String localName;
+  final bool localWon;
+
+  const _RaceResultDialogContent({
+    required this.displayList,
+    required this.winner,
+    required this.localId,
+    required this.localName,
+    required this.localWon,
+  });
+
+  @override
+  State<_RaceResultDialogContent> createState() => _RaceResultDialogContentState();
+}
+
+class _RaceResultDialogContentState extends State<_RaceResultDialogContent>
+    with TickerProviderStateMixin {
+  late AnimationController _trophyController;
+  late AnimationController _listController;
+  late Animation<double> _trophyScale;
+  late Animation<double> _trophyRotation;
+
+  @override
+  void initState() {
+    super.initState();
+
+    // Trophy animation (pulse + slight rotation)
+    _trophyController = AnimationController(
+      duration: const Duration(milliseconds: 1200),
+      vsync: this,
+    );
+    _trophyScale = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _trophyController, curve: Curves.elasticOut),
+    );
+    _trophyRotation = Tween<double>(begin: -0.1, end: 0.1).animate(
+      CurvedAnimation(parent: _trophyController, curve: Curves.easeInOut),
+    );
+
+    // List animation
+    _listController = AnimationController(
+      duration: const Duration(milliseconds: 800),
+      vsync: this,
+    );
+
+    // Start animations
+    _trophyController.forward();
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (mounted) _listController.forward();
+    });
+
+    // Continuous trophy pulse
+    _trophyController.addStatusListener((status) {
+      if (status == AnimationStatus.completed && mounted) {
+        Future.delayed(const Duration(milliseconds: 500), () {
+          if (mounted) {
+            _trophyController.reverse();
+          }
+        });
+      } else if (status == AnimationStatus.dismissed && mounted) {
+        Future.delayed(const Duration(milliseconds: 500), () {
+          if (mounted) {
+            _trophyController.forward();
+          }
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _trophyController.dispose();
+    _listController.dispose();
+    super.dispose();
+  }
+
+  String _getPositionMedal(int position) {
+    switch (position) {
+      case 0:
+        return '🥇';
+      case 1:
+        return '🥈';
+      case 2:
+        return '🥉';
+      default:
+        return '${position + 1}.';
+    }
+  }
+
+  Color _getPositionColor(int position) {
+    switch (position) {
+      case 0:
+        return const Color(0xFFFFD700); // Gold
+      case 1:
+        return const Color(0xFFC0C0C0); // Silver
+      case 2:
+        return const Color(0xFFCD7F32); // Bronze
+      default:
+        return Colors.grey[700]!;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 400),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: widget.localWon
+                ? [const Color(0xFF1a237e), const Color(0xFF0d47a1), const Color(0xFF01579b)]
+                : [const Color(0xFF263238), const Color(0xFF37474f), const Color(0xFF455a64)],
+          ),
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(
+              color: widget.localWon ? Colors.blue.withOpacity(0.5) : Colors.black.withOpacity(0.5),
+              blurRadius: 20,
+              spreadRadius: 5,
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Header with trophy
+            Container(
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: widget.localWon
+                      ? [Colors.amber.withOpacity(0.3), Colors.transparent]
+                      : [Colors.white.withOpacity(0.1), Colors.transparent],
+                ),
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+              ),
+              child: Column(
+                children: [
+                  // Animated trophy
+                  AnimatedBuilder(
+                    animation: _trophyController,
+                    builder: (context, child) {
+                      return Transform.scale(
+                        scale: _trophyScale.value * (0.95 + _trophyController.value * 0.1),
+                        child: Transform.rotate(
+                          angle: _trophyRotation.value,
+                          child: Text(
+                            widget.localWon ? '🏆' : '🏁',
+                            style: const TextStyle(fontSize: 64),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 16),
+                  // Winner announcement
+                  Text(
+                    widget.localWon ? 'Victory!' : 'Race Finished!',
+                    style: const TextStyle(
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      widget.winner.displayName.isNotEmpty
+                          ? widget.winner.displayName
+                          : 'Winner',
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // Leaderboard
+            Flexible(
+              child: AnimatedBuilder(
+                animation: _listController,
+                builder: (context, child) {
+                  return Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: widget.displayList.length,
+                      itemBuilder: (context, i) {
+                        final p = widget.displayList[i];
+                        final isWinner = p.id == widget.winner.id || p.displayName == widget.winner.displayName;
+                        final isLocal = p.id == widget.localId || p.displayName == widget.localName;
+
+                        // Staggered animation for each item
+                        final delay = i * 0.15;
+                        final animationValue = (_listController.value - delay).clamp(0.0, 1.0);
+                        final slideAnimation = Curves.easeOut.transform(animationValue);
+
+                        return Transform.translate(
+                          offset: Offset(0, 30 * (1 - slideAnimation)),
+                          child: Opacity(
+                            opacity: slideAnimation,
+                            child: Container(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                gradient: isWinner
+                                    ? LinearGradient(
+                                        colors: [
+                                          _getPositionColor(i).withOpacity(0.6),
+                                          _getPositionColor(i).withOpacity(0.3),
+                                        ],
+                                      )
+                                    : LinearGradient(
+                                        colors: [
+                                          Colors.white.withOpacity(0.15),
+                                          Colors.white.withOpacity(0.05),
+                                        ],
+                                      ),
+                                borderRadius: BorderRadius.circular(12),
+                                border: isLocal
+                                    ? Border.all(color: Colors.white.withOpacity(0.5), width: 2)
+                                    : null,
+                              ),
+                              child: Row(
+                                children: [
+                                  // Position/Medal
+                                  SizedBox(
+                                    width: 40,
+                                    child: Text(
+                                      _getPositionMedal(i),
+                                      style: const TextStyle(
+                                        fontSize: 20,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                      textAlign: TextAlign.center,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  // Player name
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          p.displayName.isNotEmpty
+                                              ? p.displayName
+                                              : (isLocal ? 'You' : 'Player'),
+                                          style: TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 16,
+                                            fontWeight: isWinner ? FontWeight.bold : FontWeight.w600,
+                                          ),
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        if (isLocal)
+                                          Text(
+                                            '(You)',
+                                            style: TextStyle(
+                                              color: Colors.white.withOpacity(0.7),
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                  // Score
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: Colors.green.withOpacity(0.3),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Text(
+                                      '${p.score}',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  // Errors
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: Colors.red.withOpacity(0.3),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Text(
+                                          '❌',
+                                          style: TextStyle(fontSize: 12),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          '${p.errors}',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  );
+                },
+              ),
+            ),
+
+            // Continue button
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: SizedBox(
+                width: double.infinity,
+                height: 50,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: widget.localWon ? Colors.amber : Colors.white.withOpacity(0.2),
+                    foregroundColor: widget.localWon ? Colors.black : Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(25),
+                    ),
+                    elevation: 5,
+                  ),
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text(
+                    'Continue',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 1.0,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

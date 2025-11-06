@@ -1,6 +1,7 @@
 // lib/pages/training_page.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:easy_localization/easy_localization.dart';
 
 // Keep existing relative imports to your challenge pages:
 import 'challenges/brand_challenge_page.dart';
@@ -241,7 +242,7 @@ class _TrainingPageState extends State<TrainingPage> {
         await widget.onLifeWon?.call();
 
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('+1 life earned!')));
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('lives.earnedOne'.tr())));
         }
       }
     } catch (e) {
@@ -266,15 +267,12 @@ class _TrainingPageState extends State<TrainingPage> {
     final result = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text("Daily limit reached"),
-        content: const Text(
-          "Free users can try 5 gated Training challenges per day.\n\n"
-          "You can upgrade for unlimited access or watch a short ad to get +5 trials now.",
-        ),
+        title: Text('training.dailyLimitReached'.tr()),
+        content: Text('training.upgradePremium'.tr()),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, 'close'), child: const Text("Close")),
-          TextButton(onPressed: () => Navigator.pop(ctx, 'upgrade'), child: const Text("Upgrade")),
-          TextButton(onPressed: () => Navigator.pop(ctx, 'watch'), child: const Text("Watch ad (+5)")),
+          TextButton(onPressed: () => Navigator.pop(ctx, 'close'), child: Text('common.close'.tr())),
+          TextButton(onPressed: () => Navigator.pop(ctx, 'upgrade'), child: Text('premium.purchaseButton'.tr(namedArgs: {'price': ''}))),
+          TextButton(onPressed: () => Navigator.pop(ctx, 'watch'), child: Text('lives.watchAd'.tr())),
         ],
       ),
     );
@@ -288,7 +286,7 @@ class _TrainingPageState extends State<TrainingPage> {
     } else if (result == 'watch') {
       // Show a small loading Snack while ad loads/shows
       final messenger = ScaffoldMessenger.of(context);
-      messenger.showSnackBar(const SnackBar(content: Text('Loading ad...')));
+      messenger.showSnackBar(SnackBar(content: Text('lives.loadingAd'.tr())));
 
       // Prepare a completer so we can wait until the reward callback runs
       _adGrantCompleter = Completer<bool>();
@@ -332,7 +330,7 @@ class _TrainingPageState extends State<TrainingPage> {
         }
         await _saveTempAdTrials();
         await _navigateToChallenge(page);
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Thanks — +5 trials granted!')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('training.attemptsRemaining'.tr(namedArgs: {'count': '5'}))));
         return;
       }
 
@@ -341,7 +339,7 @@ class _TrainingPageState extends State<TrainingPage> {
         if (premium.canStartTrainingNow()) {
           await premium.recordTrainingStart();
           await _navigateToChallenge(page);
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Thanks — +5 trials granted!')));
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('training.attemptsRemaining'.tr(namedArgs: {'count': '5'}))));
           return;
         }
       } catch (_) {
@@ -349,10 +347,25 @@ class _TrainingPageState extends State<TrainingPage> {
       }
 
       // failed to obtain grant
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Ad unavailable — please try again later.')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('lives.adUnavailable'.tr())));
     } else {
       // closed dialog -> nothing to do
       return;
+    }
+  }
+
+  String _translateModuleName(String title) {
+    switch (title) {
+      case 'Brand': return 'training.moduleBrand'.tr();
+      case 'Models by Brand': return 'challenges.modelsByBrand'.tr();
+      case 'Model': return 'training.moduleModel'.tr();
+      case 'Origin': return 'training.moduleOrigin'.tr();
+      case 'Engine Type': return 'training.moduleEngineType'.tr();
+      case 'Max Speed': return 'training.moduleMaxSpeed'.tr();
+      case 'Acceleration': return 'training.moduleAcceleration'.tr();
+      case 'Power': return 'training.modulePower'.tr();
+      case 'Special Feature': return 'challenges.specialFeature'.tr();
+      default: return title;
     }
   }
 
@@ -379,22 +392,29 @@ class _TrainingPageState extends State<TrainingPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // Header + remaining counter
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text("Training", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                Text('training.title'.tr(), style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
                 Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Icon(Icons.fitness_center, size: 18),
-                    const SizedBox(width: 6),
-                    Text("Paid challenge remaining: $remaining", style: const TextStyle(fontSize: 14)),
-                    const SizedBox(width: 8),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.fitness_center, size: 18),
+                        const SizedBox(width: 6),
+                        Text('training.attemptsRemaining'.tr(namedArgs: {'count': remaining}), style: const TextStyle(fontSize: 14)),
+                      ],
+                    ),
                     if (!isPremium)
                       TextButton(
                         onPressed: () => Navigator.of(context, rootNavigator: true).push(
                           MaterialPageRoute(builder: (_) => const PremiumPage()),
                         ),
-                        child: const Text("Upgrade"),
+                        style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8)),
+                        child: const Text('Go Premium', style: TextStyle(fontSize: 13)),
                       ),
                   ],
                 ),
@@ -420,7 +440,7 @@ class _TrainingPageState extends State<TrainingPage> {
                     ),
                     child: Stack(
                       children: [
-                        Center(child: Text(c.title, textAlign: TextAlign.center, style: const TextStyle(fontSize: 16))),
+                        Center(child: Text(_translateModuleName(c.title), textAlign: TextAlign.center, style: const TextStyle(fontSize: 16))),
                         if (isGatedItem)
                           Positioned(
                             right: 6,

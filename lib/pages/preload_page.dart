@@ -5,6 +5,7 @@ import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:easy_localization/easy_localization.dart';
 import '../main.dart';
 import '../services/lives_storage.dart';
 import '../services/image_service_cache.dart';
@@ -108,18 +109,15 @@ class _PreloadPageState extends State<PreloadPage> {
           context: context,
           barrierDismissible: false,
           builder: (ctx) => AlertDialog(
-            title: const Text('No Internet Connection'),
-            content: const Text(
-              'Loading images requires internet access.\n'
-              'Please connect to Wi-Fi or cellular data, then tap Retry.',
-            ),
+            title: Text('preload.error'.tr()),
+            content: Text('preload.error'.tr()),
             actions: [
               TextButton(
                 onPressed: () async {
                   final ok = await _hasConnectivity();
                   if (ok && mounted) Navigator.of(ctx).pop();
                 },
-                child: const Text('Retry'),
+                child: Text('preload.retry'.tr()),
               ),
             ],
           ),
@@ -417,7 +415,7 @@ class _PreloadPageState extends State<PreloadPage> {
       onWillPop: () async => !_running, // allow leaving when not downloading
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('Caching Images'),
+          title: Text('preload.title'.tr()),
           automaticallyImplyLeading: false,
         ),
         body: Padding(
@@ -425,15 +423,15 @@ class _PreloadPageState extends State<PreloadPage> {
           child: Column(
             children: [
               // Explanatory text and download button (user requested)
-              const Text(
-                'These images are required for the app to display car pictures and for some features to function correctly.',
-                style: TextStyle(fontSize: 16),
+              Text(
+                'preload.loadingAssets'.tr(),
+                style: const TextStyle(fontSize: 16),
               ),
               const SizedBox(height: 8),
               Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  'Images to download: $_total\nEstimated download size: $estimatedSizeText',
+                  'preload.progress'.tr(namedArgs: {'current': _already.toString(), 'total': _total.toString()}),
                   style: const TextStyle(fontSize: 14),
                 ),
               ),
@@ -445,7 +443,7 @@ class _PreloadPageState extends State<PreloadPage> {
                   width: double.infinity,
                   child: ElevatedButton(
                     onPressed: _total > 0 ? _onDownloadPressed : null,
-                    child: const Text('Download all images'),
+                    child: Text('preload.downloadingCars'.tr()),
                   ),
                 )
               else
@@ -453,8 +451,8 @@ class _PreloadPageState extends State<PreloadPage> {
                   children: [
                     Row(
                       children: [
-                        const Expanded(child: Text('Downloading images...')),
-                        Text('${(progress * 100).toStringAsFixed(0)}%'),
+                        Expanded(child: Text('preload.downloadingCars'.tr())),
+                        Text('preload.percentComplete'.tr(namedArgs: {'percent': (progress * 100).toStringAsFixed(0)})),
                       ],
                     ),
                     const SizedBox(height: 8),

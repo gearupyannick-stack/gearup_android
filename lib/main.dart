@@ -2,7 +2,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:easy_localization/easy_localization.dart';
 import 'services/premium_service.dart';
 import 'services/ad_service.dart';
 import 'pages/premium_page.dart';
@@ -26,11 +28,23 @@ import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'services/auth_service.dart';
 import 'services/analytics_service.dart';
+import 'services/language_service.dart';
 
 final GlobalKey<ScaffoldMessengerState> scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize EasyLocalization
+  await EasyLocalization.ensureInitialized();
+
+  // Force system UI to use dark theme (status bar, navigation bar)
+  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+    statusBarColor: Colors.transparent,
+    statusBarIconBrightness: Brightness.light,
+    systemNavigationBarColor: Color(0xFF1E1E1E),
+    systemNavigationBarIconBrightness: Brightness.light,
+  ));
 
   // Set true during local dev to use test ads
   await AdService.instance.init(testMode: false);
@@ -79,11 +93,30 @@ void main() async {
   final livesStorage = LivesStorage();
   final int savedLives = await livesStorage.readLives();
 
-  runApp(CarLearningApp(
-    shouldPreload: shouldPreload,
-    initialLives: savedLives,
-    livesStorage: livesStorage,
-  ));
+  // Load saved language preference
+  final savedLanguageCode = await LanguageService.getSavedLanguage();
+  final Locale? startLocale = savedLanguageCode != null ? Locale(savedLanguageCode) : null;
+
+  runApp(
+    EasyLocalization(
+      supportedLocales: const [
+        Locale('en'),
+        Locale('es'),
+        Locale('fr'),
+        Locale('de'),
+        Locale('it'),
+        Locale('pt'),
+      ],
+      path: 'assets/translations',
+      fallbackLocale: const Locale('en'),
+      startLocale: startLocale, // Override device locale if user has set preference
+      child: CarLearningApp(
+        shouldPreload: shouldPreload,
+        initialLives: savedLives,
+        livesStorage: livesStorage,
+      ),
+    ),
+  );
 }
 
 /// Syncs Firebase Auth state with SharedPreferences on app startup
@@ -213,11 +246,14 @@ class CarLearningApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'GearUp',
+      title: 'app.title'.tr(),
       debugShowCheckedModeBanner: false,
       scaffoldMessengerKey: scaffoldMessengerKey,
+      localizationsDelegates: context.localizationDelegates,
+      supportedLocales: context.supportedLocales,
+      locale: context.locale,
       theme: ThemeData(
-        brightness: Brightness.dark,
+        brightness: Brightness.light,
         scaffoldBackgroundColor: const Color(0xFF121212),
         primaryColor: const Color(0xFF3D0000),
         appBarTheme: const AppBarTheme(
@@ -249,6 +285,11 @@ class CarLearningApp extends StatelessWidget {
         textTheme: const TextTheme(
           titleLarge: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
           bodyMedium: TextStyle(fontSize: 16, color: Colors.white70),
+        ),
+        dialogTheme: const DialogThemeData(
+          backgroundColor: Color(0xFF1E1E1E),
+          titleTextStyle: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white),
+          contentTextStyle: TextStyle(fontSize: 16, color: Colors.white70),
         ),
       ),
 
@@ -490,7 +531,7 @@ class _MainPageState extends State<MainPage> {
 
     // immediate feedback
     scaffoldMessengerKey.currentState?.showSnackBar(
-      const SnackBar(content: Text('Nice — you earned 1 life!')),
+      SnackBar(content: Text('lives.earnedOne'.tr())),
     );
   }
 
@@ -498,7 +539,7 @@ class _MainPageState extends State<MainPage> {
     if (_isShowingAdAction) return;
     setState(() => _isShowingAdAction = true);
 
-    scaffoldMessengerKey.currentState?.showSnackBar(const SnackBar(content: Text('Loading ad...')));
+    scaffoldMessengerKey.currentState?.showSnackBar(SnackBar(content: Text('lives.loadingAd'.tr())));
 
     try {
       // AdService should call the provided onEarnedLife callback synchronously
@@ -513,14 +554,14 @@ class _MainPageState extends State<MainPage> {
 
       if (!shown) {
         scaffoldMessengerKey.currentState?.showSnackBar(
-          const SnackBar(content: Text('Ad unavailable — please try again later.')),
+          SnackBar(content: Text('lives.adUnavailable'.tr())),
         );
       }
       // if shown==true, the onEarnedLife callback will have run and persisted new lives.
     } catch (e) {
       scaffoldMessengerKey.currentState?.clearSnackBars();
       scaffoldMessengerKey.currentState?.showSnackBar(
-        SnackBar(content: Text('Error showing ad: $e')),
+        SnackBar(content: Text('lives.adError'.tr(namedArgs: {'error': e.toString()}))),
       );
       debugPrint('Error in _onWatchAdForLife: $e');
     } finally {
@@ -652,12 +693,12 @@ class _MainPageState extends State<MainPage> {
       showDialog(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: const Text('You have lost all of your lives!'),
+          title: Text('lives.lost'.tr()),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text(
-                'If you like this app, rate it 5 stars to get all your lives back!',
+              Text(
+                'lives.lostMessage'.tr(),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 16),
@@ -688,9 +729,9 @@ class _MainPageState extends State<MainPage> {
                     );
                     await launchUrl(uri, mode: LaunchMode.externalApplication);
                   },
-                  child: const Text(
-                    'Give us 5 stars review',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  child: Text(
+                    'lives.rateButton'.tr(),
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                   ),
                 ),
               ),
@@ -701,7 +742,7 @@ class _MainPageState extends State<MainPage> {
           actions: [
             TextButton(
               onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('No thanks'),
+              child: Text('lives.noThanks'.tr()),
             ),
           ],
         ),
@@ -786,48 +827,48 @@ class _MainPageState extends State<MainPage> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Row(
+        title: Row(
           children: [
-            Icon(Icons.cloud_upload, color: Colors.blue, size: 28),
-            SizedBox(width: 12),
-            Expanded(child: Text('Save Your Progress')),
+            const Icon(Icons.cloud_upload, color: Colors.blue, size: 28),
+            const SizedBox(width: 12),
+            Expanded(child: Text('anonymousUpgrade.title'.tr())),
           ],
         ),
-        content: const Column(
+        content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'You\'ve been using GearUp for 2 days! 🎉',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              'anonymousUpgrade.message'.tr(),
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
             ),
-            SizedBox(height: 12),
+            const SizedBox(height: 12),
             Text(
-              'Connect your Google account to:',
-              style: TextStyle(fontSize: 14),
+              'anonymousUpgrade.connectTo'.tr(),
+              style: const TextStyle(fontSize: 14),
             ),
-            SizedBox(height: 8),
+            const SizedBox(height: 8),
             Row(
               children: [
-                Icon(Icons.check_circle, color: Colors.green, size: 20),
-                SizedBox(width: 8),
-                Expanded(child: Text('Never lose your progress')),
+                const Icon(Icons.check_circle, color: Colors.green, size: 20),
+                const SizedBox(width: 8),
+                Expanded(child: Text('anonymousUpgrade.neverLose'.tr())),
               ],
             ),
-            SizedBox(height: 6),
+            const SizedBox(height: 6),
             Row(
               children: [
-                Icon(Icons.check_circle, color: Colors.green, size: 20),
-                SizedBox(width: 8),
-                Expanded(child: Text('Access from any device')),
+                const Icon(Icons.check_circle, color: Colors.green, size: 20),
+                const SizedBox(width: 8),
+                Expanded(child: Text('anonymousUpgrade.accessAny'.tr())),
               ],
             ),
-            SizedBox(height: 6),
+            const SizedBox(height: 6),
             Row(
               children: [
-                Icon(Icons.check_circle, color: Colors.green, size: 20),
-                SizedBox(width: 8),
-                Expanded(child: Text('Sync your achievements')),
+                const Icon(Icons.check_circle, color: Colors.green, size: 20),
+                const SizedBox(width: 8),
+                Expanded(child: Text('anonymousUpgrade.syncAchievements'.tr())),
               ],
             ),
           ],
@@ -835,7 +876,7 @@ class _MainPageState extends State<MainPage> {
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('Maybe Later'),
+            child: Text('anonymousUpgrade.maybeLater'.tr()),
           ),
           ElevatedButton.icon(
             onPressed: () {
@@ -847,15 +888,15 @@ class _MainPageState extends State<MainPage> {
               // Show a snackbar to guide them
               Future.delayed(const Duration(milliseconds: 500), () {
                 scaffoldMessengerKey.currentState?.showSnackBar(
-                  const SnackBar(
-                    content: Text('Tap the "Connect with Google" button to save your progress'),
-                    duration: Duration(seconds: 4),
+                  SnackBar(
+                    content: Text('anonymousUpgrade.guideMessage'.tr()),
+                    duration: const Duration(seconds: 4),
                   ),
                 );
               });
             },
             icon: const Icon(Icons.link),
-            label: const Text('Connect Now'),
+            label: Text('anonymousUpgrade.connectNow'.tr()),
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFF4285F4),
               foregroundColor: Colors.white,
@@ -901,8 +942,8 @@ class _MainPageState extends State<MainPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  "Here you earn Gears as you complete levels!",
+                Text(
+                  "tutorial.gear".tr(),
                   textAlign: TextAlign.center,
                   style: tutorialTextStyle,
                 ),
@@ -916,9 +957,9 @@ class _MainPageState extends State<MainPage> {
                       borderRadius: BorderRadius.circular(20),
                     ),
                   ),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("Continue"),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    child: Text("tutorial.continue".tr()),
                   ),
                 ),
               ],
@@ -942,8 +983,8 @@ class _MainPageState extends State<MainPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  "This is your daily streak — complete 5 challenges to keep it going!",
+                Text(
+                  "tutorial.streak".tr(),
                   textAlign: TextAlign.center,
                   style: tutorialTextStyle,
                 ),
@@ -957,9 +998,9 @@ class _MainPageState extends State<MainPage> {
                       borderRadius: BorderRadius.circular(20),
                     ),
                   ),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("Continue"),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    child: Text("tutorial.continue".tr()),
                   ),
                 ),
               ],
@@ -983,8 +1024,8 @@ class _MainPageState extends State<MainPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  "Tap here to see how many lives you have left, and when you’ll get the next one.",
+                Text(
+                  "tutorial.lives".tr(),
                   textAlign: TextAlign.center,
                   style: tutorialTextStyle,
                 ),
@@ -998,9 +1039,9 @@ class _MainPageState extends State<MainPage> {
                       borderRadius: BorderRadius.circular(20),
                     ),
                   ),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("Continue"),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    child: Text("tutorial.continue".tr()),
                   ),
                 ),
               ],
@@ -1025,16 +1066,16 @@ class _MainPageState extends State<MainPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  "This bar shows your current level and the map ahead — swipe or tap to explore future levels and maps.",
+                Text(
+                  "tutorial.levelProgress".tr(),
                   textAlign: TextAlign.center,
                   style: tutorialTextStyle,
                 ),
                 const SizedBox(height: 12),
-                const Text(
-                  "Tip: Unlock stages to reveal new map routes!",
+                Text(
+                  "tutorial.levelProgressTip".tr(),
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.white70, fontSize: 14),
+                  style: const TextStyle(color: Colors.white70, fontSize: 14),
                 ),
                 const SizedBox(height: 16),
                 ElevatedButton(
@@ -1046,9 +1087,9 @@ class _MainPageState extends State<MainPage> {
                       borderRadius: BorderRadius.circular(20),
                     ),
                   ),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("Continue"),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    child: Text("tutorial.continue".tr()),
                   ),
                 ),
               ],
@@ -1072,8 +1113,8 @@ class _MainPageState extends State<MainPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  "Go here to race on the Track and collect flags!",
+                Text(
+                  "tutorial.homeTab".tr(),
                   textAlign: TextAlign.center,
                   style: tutorialTextStyle,
                 ),
@@ -1087,9 +1128,9 @@ class _MainPageState extends State<MainPage> {
                       borderRadius: BorderRadius.circular(20),
                     ),
                   ),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("Continue"),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    child: Text("tutorial.continue".tr()),
                   ),
                 ),
               ],
@@ -1113,8 +1154,8 @@ class _MainPageState extends State<MainPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  "Visit Training to practice and earn extra lives.",
+                Text(
+                  "tutorial.trainingTab".tr(),
                   textAlign: TextAlign.center,
                   style: tutorialTextStyle,
                 ),
@@ -1128,9 +1169,9 @@ class _MainPageState extends State<MainPage> {
                       borderRadius: BorderRadius.circular(20),
                     ),
                   ),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("Continue"),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    child: Text("tutorial.continue".tr()),
                   ),
                 ),
               ],
@@ -1154,16 +1195,16 @@ class _MainPageState extends State<MainPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  "Multiplayer Races let you compete against other players in real-time — tap the Race tab to join or create matches.",
+                Text(
+                  "tutorial.multiplayer".tr(),
                   textAlign: TextAlign.center,
                   style: tutorialTextStyle,
                 ),
                 const SizedBox(height: 12),
-                const Text(
-                  "Tip: Use quick matches to jump in fast, or create a private room to play with friends.",
+                Text(
+                  "tutorial.multiplayerTip".tr(),
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.white70, fontSize: 14),
+                  style: const TextStyle(color: Colors.white70, fontSize: 14),
                 ),
                 const SizedBox(height: 16),
                 ElevatedButton(
@@ -1175,9 +1216,9 @@ class _MainPageState extends State<MainPage> {
                       borderRadius: BorderRadius.circular(20),
                     ),
                   ),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("Continue"),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    child: Text("tutorial.continue".tr()),
                   ),
                 ),
               ],
@@ -1201,8 +1242,8 @@ class _MainPageState extends State<MainPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  "Browse all cars and learn their specs here.",
+                Text(
+                  "tutorial.libraryTab".tr(),
                   textAlign: TextAlign.center,
                   style: tutorialTextStyle,
                 ),
@@ -1216,9 +1257,9 @@ class _MainPageState extends State<MainPage> {
                       borderRadius: BorderRadius.circular(20),
                     ),
                   ),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("Continue"),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    child: Text("tutorial.continue".tr()),
                   ),
                 ),
               ],
@@ -1242,8 +1283,8 @@ class _MainPageState extends State<MainPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  "Check your achievements and stats in your profile. Replay this intro anytime from your profile settings.",
+                Text(
+                  "tutorial.profileTab".tr(),
                   textAlign: TextAlign.center,
                   style: tutorialTextStyle,
                 ),
@@ -1257,9 +1298,9 @@ class _MainPageState extends State<MainPage> {
                       borderRadius: BorderRadius.circular(20),
                     ),
                   ),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("Continue"),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    child: Text("tutorial.continue".tr()),
                   ),
                 ),
               ],
@@ -1283,8 +1324,8 @@ class _MainPageState extends State<MainPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  "Tap this first flag to start your race!",
+                Text(
+                  "tutorial.firstFlag".tr(),
                   textAlign: TextAlign.center,
                   style: tutorialTextStyle,
                 ),
@@ -1298,9 +1339,9 @@ class _MainPageState extends State<MainPage> {
                       borderRadius: BorderRadius.circular(20),
                     ),
                   ),
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("Finish"),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                    child: Text("tutorial.finish".tr()),
                   ),
                 ),
               ],
@@ -1314,7 +1355,7 @@ class _MainPageState extends State<MainPage> {
     _tutorialCoachMark = TutorialCoachMark(
       targets: targets,
       colorShadow: Colors.black87,
-      textSkip: "SKIP",
+      textSkip: "tutorial.skip".tr(),
       textStyleSkip: const TextStyle(color: Colors.white),
       // Move SKIP to center + skipYOffset down
       alignSkip: Alignment(0, skipYOffset),
@@ -1339,13 +1380,13 @@ class _MainPageState extends State<MainPage> {
   }
 
   String _getStreakTitle(int streak) {
-    if (streak >= 100) return "GearUp Legend";
-    if (streak >= 60) return "Turbo Master";
-    if (streak >= 30) return "Car Master";
-    if (streak >= 14) return "Rising Racer";
-    if (streak >= 7) return "Committed Driver";
-    if (streak >= 3) return "Starter";
-    return "Newbie";
+    if (streak >= 100) return "streak.gearupLegend".tr();
+    if (streak >= 60) return "streak.turboMaster".tr();
+    if (streak >= 30) return "streak.carMaster".tr();
+    if (streak >= 14) return "streak.risingRacer".tr();
+    if (streak >= 7) return "streak.committedDriver".tr();
+    if (streak >= 3) return "streak.starter".tr();
+    return "streak.newbie".tr();
   }
 
   // Loads the stored day streak from SharedPreferences.
@@ -1360,7 +1401,7 @@ class _MainPageState extends State<MainPage> {
   void showAchievementSnackBar(String title) {
     scaffoldMessengerKey.currentState?.showSnackBar(
       SnackBar(
-        content: Text("🏆 Achievement Unlocked: $title"),
+        content: Text("profile.achievementUnlocked".tr(namedArgs: {'title': title})),
         duration: const Duration(seconds: 2),
         behavior: SnackBarBehavior.floating,
         backgroundColor: Colors.black87,
@@ -1403,7 +1444,7 @@ class _MainPageState extends State<MainPage> {
 
       scaffoldMessengerKey.currentState?.showSnackBar(
         SnackBar(
-          content: Text("🎁 $streak-Day Streak! Bonus awarded!"),
+          content: Text("streak.bonus".tr(namedArgs: {'count': streak.toString()})),
           duration: const Duration(seconds: 3),
           behavior: SnackBarBehavior.floating,
           backgroundColor: Colors.deepOrangeAccent,
@@ -1414,9 +1455,9 @@ class _MainPageState extends State<MainPage> {
 
   void _playStreakAnimation() {
     scaffoldMessengerKey.currentState?.showSnackBar(
-      const SnackBar(
-        content: Text("🔥 Streak Up! Keep it going!"),
-        duration: Duration(seconds: 2),
+      SnackBar(
+        content: Text("streak.fireUp".tr()),
+        duration: const Duration(seconds: 2),
         behavior: SnackBarBehavior.floating,
         backgroundColor: Colors.orangeAccent,
       ),
@@ -1509,6 +1550,125 @@ class _MainPageState extends State<MainPage> {
     });
   }
 
+  void _showCategorySelectionPopup() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text('categories.title'.tr()),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Current category - Road Legal Cars
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF2D2D2D),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.green, width: 2),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.check_circle, color: Colors.green, size: 32),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'categories.roadLegalCars'.tr(),
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'categories.current'.tr(namedArgs: {'count': gearCount.toString()}),
+                              style: const TextStyle(
+                                fontSize: 14,
+                                color: Colors.white70,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                // Coming soon categories
+                _buildLockedCategory('categories.raceCars'.tr()),
+                const SizedBox(height: 12),
+                _buildLockedCategory('categories.vintageCars'.tr()),
+                const SizedBox(height: 12),
+                _buildLockedCategory('categories.motorsport'.tr()),
+                const SizedBox(height: 16),
+                Text(
+                  'categories.stayTuned'.tr(),
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    color: Colors.white60,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text('common.close'.tr()),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildLockedCategory(String categoryName) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A1A),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade800, width: 1),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.lock, color: Colors.grey.shade600, size: 32),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  categoryName,
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.grey.shade500,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'categories.comingSoon'.tr(),
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: Colors.grey.shade600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _showLivesPopup() async {
     // Refresh lives when opening popup
     lives = await widget.livesStorage.readLives();
@@ -1521,15 +1681,15 @@ class _MainPageState extends State<MainPage> {
       builder: (context) {
         if (lives >= _maxLives) {
           return AlertDialog(
-            title: const Text('Your Lives'),
-            content: const Text('Lives are full'),
+            title: Text('lives.title'.tr()),
+            content: Text('lives.full'.tr()),
             actions: [
-              TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('OK')),
+              TextButton(onPressed: () => Navigator.of(context).pop(), child: Text('common.ok'.tr())),
             ],
           );
         } else {
           return AlertDialog(
-            title: const Text('Your Lives'),
+            title: Text('lives.title'.tr()),
             content: ValueListenableBuilder<int>(
               valueListenable: _lifeTimerRemaining,
               builder: (context, remaining, child) {
@@ -1539,9 +1699,9 @@ class _MainPageState extends State<MainPage> {
                 return Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text("You have $lives / $_maxLives lives remaining."),
+                    Text('lives.remaining'.tr(namedArgs: {'count': lives.toString(), 'max': _maxLives.toString()})),
                     const SizedBox(height: 8),
-                    Text("Next life in $minutes min $seconds sec"),
+                    Text('lives.nextIn'.tr(namedArgs: {'minutes': minutes.toString(), 'seconds': seconds.toString()})),
                     const SizedBox(height: 8),
                     LinearProgressIndicator(value: progress.clamp(0.0, 1.0)),
                     const SizedBox(height: 16),
@@ -1559,7 +1719,7 @@ class _MainPageState extends State<MainPage> {
                             _currentIndex = 1; // go to Training tab
                           });
                         },
-                        child: const Text("Train for life"),
+                        child: Text('lives.trainForLife'.tr()),
                       ),
                     ),
                     const SizedBox(height: 8),
@@ -1575,7 +1735,7 @@ class _MainPageState extends State<MainPage> {
                           Navigator.of(context).pop();
                           _onWatchAdForLife();
                         },
-                        child: const Text("Watch ad (get 1 life)"),
+                        child: Text('lives.watchAd'.tr()),
                       ),
                     ),
                     const SizedBox(height: 8),
@@ -1593,7 +1753,7 @@ class _MainPageState extends State<MainPage> {
                             MaterialPageRoute(builder: (_) => const PremiumPage()),
                           );
                         },
-                        child: const Text("Get unlimited lives"),
+                        child: Text('lives.unlimited'.tr()),
                       ),
                     ),
                   ],
@@ -1601,7 +1761,7 @@ class _MainPageState extends State<MainPage> {
               },
             ),
             actions: [
-              TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('OK')),
+              TextButton(onPressed: () => Navigator.of(context).pop(), child: Text('common.ok'.tr())),
             ],
           );
         }
@@ -1619,7 +1779,7 @@ class _MainPageState extends State<MainPage> {
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text("Play Calendar"),
+        title: Text('calendar.title'.tr()),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -1627,13 +1787,13 @@ class _MainPageState extends State<MainPage> {
               dailyCounts: dailyCounts.cast<String,int>(),
             ),
             const SizedBox(height: 12),
-            const Text("Complete 5 flag challenges to do your streak",
-                  style: TextStyle(fontSize:11, color:Colors.grey)),
+            Text('calendar.complete5'.tr(),
+                  style: const TextStyle(fontSize:11, color:Colors.grey)),
             const SizedBox(height: 6),
             LinearProgressIndicator(value: (dailyCounts[DateTime.now().toIso8601String().split('T').first] ?? 0).clamp(0,5)/5),
           ],
         ),
-        actions: [ TextButton(onPressed: () => Navigator.pop(context), child: const Text("Close")) ],
+        actions: [ TextButton(onPressed: () => Navigator.pop(context), child: Text('calendar.close'.tr())) ],
       ),
     );
   }
@@ -1647,13 +1807,16 @@ class _MainPageState extends State<MainPage> {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             // Gear count
-            Row(
-              key: _gearKey,
-              children: [
-                Image.asset('assets/icons/gear.png', height: 24),
-                const SizedBox(width: 4),
-                Text('$gearCount', style: const TextStyle(fontSize: 18)),
-              ],
+            GestureDetector(
+              onTap: _showCategorySelectionPopup,
+              child: Row(
+                key: _gearKey,
+                children: [
+                  Image.asset('assets/icons/gear.png', height: 24),
+                  const SizedBox(width: 4),
+                  Text('$gearCount', style: const TextStyle(fontSize: 18)),
+                ],
+              ),
             ),
             // Daily streak
             Row(
@@ -1697,26 +1860,30 @@ class _MainPageState extends State<MainPage> {
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _currentIndex,
         onTap: _onTabTapped,
+        type: BottomNavigationBarType.fixed,
+        backgroundColor: const Color(0xFF1E1E1E),
+        selectedItemColor: Colors.redAccent,
+        unselectedItemColor: Colors.white70,
         items: [
           BottomNavigationBarItem(
             icon: Container(key: _tabHomeKey, child: const Icon(Icons.home)),
-            label: 'Home',
+            label: 'navigation.home'.tr(),
           ),
           BottomNavigationBarItem(
             icon: Container(key: _tabTrainingKey, child: const Icon(Icons.fitness_center)),
-            label: 'Training',
+            label: 'navigation.training'.tr(),
           ),
           BottomNavigationBarItem(
             icon: Container(key: _tabRaceKey, child: const Icon(Icons.flag)),
-            label: 'Race',
+            label: 'navigation.race'.tr(),
           ),
           BottomNavigationBarItem(
             icon: Container(key: _tabLibraryKey, child: const Icon(Icons.library_books)),
-            label: 'Library',
+            label: 'navigation.library'.tr(),
           ),
           BottomNavigationBarItem(
             icon: Container(key: _tabProfileKey, child: const Icon(Icons.person)),
-            label: 'Profile',
+            label: 'navigation.profile'.tr(),
           ),
         ],
       ),

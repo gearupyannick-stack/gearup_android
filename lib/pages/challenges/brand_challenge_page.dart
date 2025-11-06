@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:easy_localization/easy_localization.dart';
 import '../../services/audio_feedback.dart';
 
 import '../../services/image_service_cache.dart'; // ← Utilisation du cache local
@@ -35,6 +36,7 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
   // ── For image cycling ───────────────────────────────────────────────────────
   Timer? _imageCycleTimer;
   List<int> _currentImageIndices = [];
+  int _brandQuestionImageIndex = 0; // For single image in brand questions
 
   // ── Answer‐highlighting ─────────────────────────────────────────────────────
   bool _answered = false;
@@ -42,6 +44,7 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
   String? _selectedModel;
 
   static const int _maxImageIndex = 5; // cycle 0…5
+  static const int _maxFrames = 6; // Total frames (0-5)
 
   @override
   void initState() {
@@ -102,6 +105,18 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
         opts.add(brandNames[rnd.nextInt(brandNames.length)]);
       }
       brandOptions = opts.toList()..shuffle();
+
+      // Start cycling for single brand question image
+      _brandQuestionImageIndex = 0;
+      _imageCycleTimer =
+          Timer.periodic(const Duration(seconds: 3), (timer) {
+        if (!_answered) {
+          setState(() {
+            _brandQuestionImageIndex =
+                (_brandQuestionImageIndex + 1) % _maxFrames;
+          });
+        }
+      });
     } else {
       // Pick 4 distinct model entries for image grid
       final opts = <Map<String, String>>[
@@ -119,19 +134,72 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
       // initialize cycling indices
       _currentImageIndices = List<int>.filled(modelOptions.length, 0);
 
-      // start cycling every 2 seconds
+      // start cycling every 3 seconds for all grid images
       _imageCycleTimer =
-          Timer.periodic(const Duration(seconds: 2), (timer) {
-        setState(() {
-          for (var i = 0; i < _currentImageIndices.length; i++) {
-            _currentImageIndices[i] =
-                (_currentImageIndices[i] + 1) % (_maxImageIndex + 1);
-          }
-        });
+          Timer.periodic(const Duration(seconds: 3), (timer) {
+        if (!_answered) {
+          setState(() {
+            for (var i = 0; i < _currentImageIndices.length; i++) {
+              _currentImageIndices[i] =
+                  (_currentImageIndices[i] + 1) % _maxFrames;
+            }
+          });
+        }
       });
     }
 
     setState(() {});
+  }
+
+  void _goToNextFrame() {
+    if (_answered) return;
+    _imageCycleTimer?.cancel();
+    setState(() {
+      if (isBrandQuestion) {
+        _brandQuestionImageIndex = (_brandQuestionImageIndex + 1) % _maxFrames;
+      } else {
+        for (var i = 0; i < _currentImageIndices.length; i++) {
+          _currentImageIndices[i] = (_currentImageIndices[i] + 1) % _maxFrames;
+        }
+      }
+    });
+    _startCycleTimer();
+  }
+
+  void _goToPreviousFrame() {
+    if (_answered) return;
+    _imageCycleTimer?.cancel();
+    setState(() {
+      if (isBrandQuestion) {
+        _brandQuestionImageIndex =
+            (_brandQuestionImageIndex - 1 + _maxFrames) % _maxFrames;
+      } else {
+        for (var i = 0; i < _currentImageIndices.length; i++) {
+          _currentImageIndices[i] =
+              (_currentImageIndices[i] - 1 + _maxFrames) % _maxFrames;
+        }
+      }
+    });
+    _startCycleTimer();
+  }
+
+  void _startCycleTimer() {
+    _imageCycleTimer?.cancel();
+    _imageCycleTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+      if (!_answered) {
+        setState(() {
+          if (isBrandQuestion) {
+            _brandQuestionImageIndex =
+                (_brandQuestionImageIndex + 1) % _maxFrames;
+          } else {
+            for (var i = 0; i < _currentImageIndices.length; i++) {
+              _currentImageIndices[i] =
+                  (_currentImageIndices[i] + 1) % _maxFrames;
+            }
+          }
+        });
+      }
+    });
   }
 
   void _finishQuiz() {
@@ -141,10 +209,13 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Quiz Completed!'),
+        title: Text('challenges.complete'.tr()),
         content: Text(
-          'You got $correctAnswers/20 in '
-          '${elapsedSeconds ~/ 60}m '
+          'challenges.score'.tr(namedArgs: {
+            'score': correctAnswers.toString(),
+            'total': '20'
+          }) +
+          ' in ${elapsedSeconds ~/ 60}m '
           '${(elapsedSeconds % 60).toString().padLeft(2, '0')}s',
         ),
         actions: [
@@ -157,7 +228,7 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
                 Navigator.pop(context,'$correctAnswers/20 in ${elapsedSeconds ~/ 60}\'${(elapsedSeconds % 60).toString().padLeft(2, '0')}\'\'',);
               }
             },
-            child: const Text('OK'),
+            child: Text('common.ok'.tr()),
           ),
         ],
       ),
@@ -196,7 +267,7 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Brand Challenge'),
+        title: Text('challenges.brand'.tr()),
         actions: [
           Padding(
             padding: const EdgeInsets.all(8.0),
@@ -216,7 +287,10 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
               child: Column(
                 children: [
                   Text(
-                    'Score: $correctAnswers/20',
+                    'challenges.score'.tr(namedArgs: {
+                      'score': correctAnswers.toString(),
+                      'total': '20'
+                    }),
                     style: const TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.bold,
@@ -226,21 +300,70 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
 
                   // ── TEXT-BUTTON MODE ─────────────────────────────────────────
                   if (isBrandQuestion) ...[
-                    const Text(
-                      'Guess the brand from these photos:',
-                      style: TextStyle(fontSize: 20),
+                    Text(
+                      'challenges.whichBrand'.tr(),
+                      style: const TextStyle(fontSize: 20),
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: 16),
-                    for (int i = 0; i < 6; i++) ...[
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 4.0),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: _buildStaticModelImage(i),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 500),
+                        transitionBuilder: (child, anim) =>
+                            FadeTransition(opacity: anim, child: child),
+                        child: Image(
+                          key: ValueKey<int>(_brandQuestionImageIndex),
+                          image: ImageCacheService.instance.imageProvider(
+                            '${_fileBase(randomBrand!, randomModel!)}$_brandQuestionImageIndex.webp',
+                          ),
+                          height: 200,
+                          width: double.infinity,
+                          fit: BoxFit.cover,
                         ),
                       ),
-                    ],
+                    ),
+                    const SizedBox(height: 12),
+                    // Manual frame controls
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.arrow_back_ios, size: 20),
+                          onPressed: _answered ? null : _goToPreviousFrame,
+                          color: Colors.white70,
+                        ),
+                        Text(
+                          '${_brandQuestionImageIndex + 1}/$_maxFrames',
+                          style: const TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.bold),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.arrow_forward_ios, size: 20),
+                          onPressed: _answered ? null : _goToNextFrame,
+                          color: Colors.white70,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    // Dot indicators
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: List.generate(
+                        _maxFrames,
+                        (index) => Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 4),
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: _brandQuestionImageIndex == index
+                                ? Colors.red
+                                : Colors.grey.withOpacity(0.4),
+                          ),
+                        ),
+                      ),
+                    ),
                     const SizedBox(height: 24),
                     for (var b in brandOptions)
                       Padding(
@@ -280,7 +403,7 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
                     // ── IMAGE-GRID MODE ────────────────────────────────────────
                     const SizedBox(height: 16),
                     Text(
-                      'Which image is a $randomBrand?',
+                      'challenges.whichBrand'.tr() + ' $randomBrand?',
                       style: const TextStyle(fontSize: 20),
                       textAlign: TextAlign.center,
                     ),
@@ -347,6 +470,48 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
                           ),
                         );
                       },
+                    ),
+                    const SizedBox(height: 12),
+                    // Manual frame controls for grid
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.arrow_back_ios, size: 20),
+                          onPressed: _answered ? null : _goToPreviousFrame,
+                          color: Colors.white70,
+                        ),
+                        Text(
+                          '${(_currentImageIndices.isNotEmpty ? _currentImageIndices[0] : 0) + 1}/$_maxFrames',
+                          style: const TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.bold),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.arrow_forward_ios, size: 20),
+                          onPressed: _answered ? null : _goToNextFrame,
+                          color: Colors.white70,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    // Dot indicators
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: List.generate(
+                        _maxFrames,
+                        (index) => Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 4),
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: (_currentImageIndices.isNotEmpty &&
+                                    _currentImageIndices[0] == index)
+                                ? Colors.red
+                                : Colors.grey.withOpacity(0.4),
+                          ),
+                        ),
+                      ),
                     ),
                   ],
                 ],

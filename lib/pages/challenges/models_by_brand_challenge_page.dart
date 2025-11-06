@@ -5,6 +5,7 @@ import 'dart:convert';               // for LineSplitter
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:easy_localization/easy_localization.dart';
 import '../../services/audio_feedback.dart';
 
 import '../../services/image_service_cache.dart'; // ← Utilisation du cache local
@@ -59,7 +60,7 @@ class _ModelsByBrandChallengePageState
     // Loading state
     if (_brands.isEmpty) {
       return Scaffold(
-        appBar: AppBar(title: const Text('Models by Brand')),
+        appBar: AppBar(title: Text('challenges.modelsByBrand'.tr())),
         body: const Center(child: CircularProgressIndicator()),
       );
     }
@@ -67,7 +68,7 @@ class _ModelsByBrandChallengePageState
     // Brand selection grid
     if (_selectedBrand == null) {
       return Scaffold(
-        appBar: AppBar(title: const Text('Models by Brand')),
+        appBar: AppBar(title: Text('challenges.modelsByBrand'.tr())),
         body: Padding(
           padding: const EdgeInsets.all(16),
           child: GridView.builder(
@@ -210,6 +211,7 @@ class _BrandModelQuizPageState extends State<BrandModelQuizPage> {
   int _frameIndex = 0;
   late Timer _quizTimer;
   late Timer _frameTimer;
+  static const int _maxFrames = 6;
 
   @override
   void initState() {
@@ -221,12 +223,33 @@ class _BrandModelQuizPageState extends State<BrandModelQuizPage> {
       setState(() => _elapsedSeconds++);
     });
 
-    // frame cycling every 2 seconds
-    _frameTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      setState(() => _frameIndex = (_frameIndex + 1) % _frameCount);
-    });
-
+    _startFrameTimer();
     _nextQuestion();
+  }
+
+  void _startFrameTimer() {
+    _frameTimer?.cancel();
+    _frameTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (!_answered) {
+        setState(() => _frameIndex = (_frameIndex + 1) % _maxFrames);
+      }
+    });
+  }
+
+  void _goToNextFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex + 1) % _maxFrames;
+    });
+    _startFrameTimer();
+  }
+
+  void _goToPreviousFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex - 1 + _maxFrames) % _maxFrames;
+    });
+    _startFrameTimer();
   }
 
   @override
@@ -268,10 +291,13 @@ class _BrandModelQuizPageState extends State<BrandModelQuizPage> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Quiz Completed!'),
+        title: Text('challenges.complete'.tr()),
         content: Text(
-          'You got $_correctAnswers/$_maxQuestions in '
-          '${_elapsedSeconds ~/ 60}m '
+          'challenges.score'.tr(namedArgs: {
+            'score': _correctAnswers.toString(),
+            'total': _maxQuestions.toString()
+          }) +
+          ' in ${_elapsedSeconds ~/ 60}m '
           '${(_elapsedSeconds % 60).toString().padLeft(2, '0')}s',
         ),
         actions: [
@@ -284,7 +310,7 @@ class _BrandModelQuizPageState extends State<BrandModelQuizPage> {
                 Navigator.pop(context,'$_correctAnswers/20 in ${_elapsedSeconds ~/ 60}\'${(_elapsedSeconds % 60).toString().padLeft(2, '0')}\'\'',);
               }
             },
-            child: const Text('OK'),
+            child: Text('common.ok'.tr()),
           ),
         ],
       ),
@@ -329,7 +355,7 @@ if (_answered) return;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Models by Brand'),
+        title: Text('challenges.modelsByBrand'.tr()),
         actions: [
           Padding(
             padding: const EdgeInsets.all(8.0),
@@ -347,26 +373,79 @@ if (_answered) return;
         child: Column(
           children: [
             Text(
-              'Score: $_correctAnswers/$_maxQuestions',
+              'challenges.score'.tr(namedArgs: {
+                'score': _correctAnswers.toString(),
+                'total': _maxQuestions.toString()
+              }),
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 16),
 
             if (_isImageToModel) ...[
-              const Text(
-                'Which model of this brand is shown?',
-                style: TextStyle(fontSize: 20),
+              Text(
+                'challenges.whichModels'.tr(namedArgs: {'brand': widget.brand}),
+                style: const TextStyle(fontSize: 20),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 16),
-              for (int i = 0; i < _frameCount; i++)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4.0),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: _buildStaticModelImage(i),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 500),
+                  transitionBuilder: (child, anim) =>
+                      FadeTransition(opacity: anim, child: child),
+                  child: Image(
+                    key: ValueKey<int>(_frameIndex),
+                    image: ImageCacheService.instance.imageProvider(
+                      '${_formatImageName(widget.brand, _correctAnswer)}$_frameIndex.webp',
+                    ),
+                    height: 200,
+                    width: double.infinity,
+                    fit: BoxFit.cover,
                   ),
                 ),
+              ),
+              const SizedBox(height: 12),
+              // Manual frame controls
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back_ios, size: 20),
+                    onPressed: _answered ? null : _goToPreviousFrame,
+                    color: Colors.white70,
+                  ),
+                  Text(
+                    '${_frameIndex + 1}/$_maxFrames',
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.arrow_forward_ios, size: 20),
+                    onPressed: _answered ? null : _goToNextFrame,
+                    color: Colors.white70,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              // Dot indicators
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(
+                  _maxFrames,
+                  (index) => Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 4),
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _frameIndex == index
+                          ? Colors.red
+                          : Colors.grey.withOpacity(0.4),
+                    ),
+                  ),
+                ),
+              ),
               const SizedBox(height: 24),
               for (var m in _options)
                 Padding(
@@ -405,7 +484,7 @@ if (_answered) return;
               const SizedBox(height: 16),
               // ask for a specific model now
               Text(
-                'Tap the image of a $_correctAnswer:',
+                'challenges.whichModel'.tr() + ' $_correctAnswer?',
                 style: const TextStyle(fontSize: 20),
                 textAlign: TextAlign.center,
               ),
@@ -463,6 +542,47 @@ if (_answered) return;
                     ),
                   );
                 },
+              ),
+              const SizedBox(height: 12),
+              // Manual frame controls for grid
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back_ios, size: 20),
+                    onPressed: _answered ? null : _goToPreviousFrame,
+                    color: Colors.white70,
+                  ),
+                  Text(
+                    '${_frameIndex + 1}/$_maxFrames',
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.arrow_forward_ios, size: 20),
+                    onPressed: _answered ? null : _goToNextFrame,
+                    color: Colors.white70,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              // Dot indicators
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(
+                  _maxFrames,
+                  (index) => Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 4),
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _frameIndex == index
+                          ? Colors.red
+                          : Colors.grey.withOpacity(0.4),
+                    ),
+                  ),
+                ),
               ),
             ],
           ],

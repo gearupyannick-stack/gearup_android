@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:easy_localization/easy_localization.dart';
 import '../services/auth_service.dart';
 import '../services/audio_feedback.dart';
 import '../services/analytics_service.dart';
@@ -105,7 +106,7 @@ super.dispose();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Could not continue as guest: $e'),
+            content: Text('welcome.couldNotContinueAsGuest'.tr(namedArgs: {'error': e.toString()})),
             duration: const Duration(seconds: 5),
           ),
         );
@@ -155,7 +156,7 @@ super.dispose();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Sign-in failed: ${e.toString()}'),
+            content: Text('welcome.signInFailed'.tr(namedArgs: {'error': e.toString()})),
             duration: const Duration(seconds: 5),
           ),
         );
@@ -193,7 +194,7 @@ super.dispose();
             left: 16,
             right: 16,
             child: Text(
-              "Welcome to GearUp",
+              "welcome.title".tr(),
               textAlign: TextAlign.center,
               style: const TextStyle(
                 fontSize: 32,
@@ -262,9 +263,9 @@ super.dispose();
                   height: 50,
                   child: OutlinedButton.icon(
                     onPressed: _busy ? null : _continueWithGoogle,
-                    label: const Text(
-                      "Continue with Google",
-                      style: TextStyle(fontSize: 16),
+                    label: Text(
+                      "welcome.continueWithGoogle".tr(),
+                      style: const TextStyle(fontSize: 16),
                     ),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: Colors.white,
@@ -289,9 +290,9 @@ super.dispose();
                         borderRadius: BorderRadius.circular(12),
                       ),
                     ),
-                    child: const Text(
-                      "Join as a guest",
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                    child: Text(
+                      "welcome.joinAsGuest".tr(),
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                     ),
                   ),
                 ),

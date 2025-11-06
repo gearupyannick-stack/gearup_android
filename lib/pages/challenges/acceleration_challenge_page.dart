@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:easy_localization/easy_localization.dart';
 import '../../services/image_service_cache.dart'; // ← Utilisation du cache local
 import '../../services/audio_feedback.dart'; // centralized audio router
 
@@ -33,6 +34,7 @@ class _AccelerationChallengePageState extends State<AccelerationChallengePage> {
   // Frame animation for rotating car images
   int _frameIndex = 0;
   Timer? _frameTimer;
+  static const int _maxFrames = 6;
 
   // Answer highlighting
   bool _answered = false;
@@ -56,12 +58,34 @@ class _AccelerationChallengePageState extends State<AccelerationChallengePage> {
       setState(() => _elapsedSeconds++);
     });
 
-    // Start frame animation timer (advance every 2 seconds)
-    _frameTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-      setState(() {
-        _frameIndex = (_frameIndex + 1) % 6;
-      });
+    _startFrameTimer();
+  }
+
+  void _startFrameTimer() {
+    _frameTimer?.cancel();
+    _frameTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (!_answered) {
+        setState(() {
+          _frameIndex = (_frameIndex + 1) % _maxFrames;
+        });
+      }
     });
+  }
+
+  void _goToNextFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex + 1) % _maxFrames;
+    });
+    _startFrameTimer();
+  }
+
+  void _goToPreviousFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex - 1 + _maxFrames) % _maxFrames;
+    });
+    _startFrameTimer();
   }
 
   @override
@@ -108,13 +132,18 @@ class _AccelerationChallengePageState extends State<AccelerationChallengePage> {
     _currentModel = row['model'];
     _correctAcceleration = row['acceleration']!;
 
-    // Build four distinct acceleration options
-    final opts = <String>{_correctAcceleration};
+    // Build 4 distinct acceleration options with uniqueness check
+    final used = <String>{_correctAcceleration};
+    final opts = [_correctAcceleration];
     while (opts.length < 4) {
-      opts.add(_carData[rnd.nextInt(_carData.length)]['acceleration']!);
+      final candidate = _carData[rnd.nextInt(_carData.length)]['acceleration']!;
+      if (!used.contains(candidate)) {
+        used.add(candidate);
+        opts.add(candidate);
+      }
     }
     setState(() {
-      _options = opts.toList()..shuffle();
+      _options = opts..shuffle();
     });
 
     // signal a "page flip" / new question event to audio layer
@@ -181,10 +210,13 @@ class _AccelerationChallengePageState extends State<AccelerationChallengePage> {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Quiz Completed!'),
+        title: Text('challenges.complete'.tr()),
         content: Text(
-          'You got $_correctAnswers/20 in '
-          '${_elapsedSeconds ~/ 60}m ${(_elapsedSeconds % 60).toString().padLeft(2, '0')}s',
+          'challenges.score'.tr(namedArgs: {
+            'score': _correctAnswers.toString(),
+            'total': '20'
+          }) +
+          ' in ${_elapsedSeconds ~/ 60}m ${(_elapsedSeconds % 60).toString().padLeft(2, '0')}s',
         ),
         actions: [
           TextButton(
@@ -196,7 +228,7 @@ class _AccelerationChallengePageState extends State<AccelerationChallengePage> {
                 Navigator.pop(context,'$_correctAnswers/20 in ${_elapsedSeconds ~/ 60}\'${(_elapsedSeconds % 60).toString().padLeft(2, '0')}\'\'',);
               }
             },
-            child: const Text('OK'),
+            child: Text('common.ok'.tr()),
           ),
         ],
       ),
@@ -234,7 +266,7 @@ class _AccelerationChallengePageState extends State<AccelerationChallengePage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Acceleration Challenge'),
+        title: Text('challenges.acceleration'.tr()),
         actions: [
           Padding(
             padding: const EdgeInsets.all(8.0),
@@ -255,7 +287,7 @@ class _AccelerationChallengePageState extends State<AccelerationChallengePage> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Text(
-                    'What is the acceleration (0–100 km/h) of\n'
+                    'challenges.whatAcceleration'.tr() + '\n'
                     '${_currentBrand!} ${_currentModel!}?',
                     textAlign: TextAlign.center,
                     style: const TextStyle(
@@ -266,7 +298,50 @@ class _AccelerationChallengePageState extends State<AccelerationChallengePage> {
                     borderRadius: BorderRadius.circular(12),
                     child: AnimatedSwitcher(
                       duration: const Duration(milliseconds: 500),
+                      transitionBuilder: (child, anim) =>
+                          FadeTransition(opacity: anim, child: child),
                       child: _buildFrameImage(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  // Manual frame controls
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.arrow_back_ios, size: 20),
+                        onPressed: _answered ? null : _goToPreviousFrame,
+                        color: Colors.white70,
+                      ),
+                      Text(
+                        '${_frameIndex + 1}/$_maxFrames',
+                        style: const TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.bold),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.arrow_forward_ios, size: 20),
+                        onPressed: _answered ? null : _goToNextFrame,
+                        color: Colors.white70,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  // Dot indicators
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: List.generate(
+                      _maxFrames,
+                      (index) => Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 4),
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: _frameIndex == index
+                              ? Colors.red
+                              : Colors.grey.withOpacity(0.4),
+                        ),
+                      ),
                     ),
                   ),
                   const SizedBox(height: 24),
