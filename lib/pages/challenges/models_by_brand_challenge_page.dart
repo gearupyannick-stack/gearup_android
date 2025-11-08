@@ -197,7 +197,7 @@ class BrandModelQuizPage extends StatefulWidget {
 
 class _BrandModelQuizPageState extends State<BrandModelQuizPage> {
   static const int _maxQuestions = 20;
-  static const int _frameCount = 6; // frames 0..5
+// frames 0..5
 
   late List<String> _allModels;
   late List<String> _options;
@@ -228,7 +228,7 @@ class _BrandModelQuizPageState extends State<BrandModelQuizPage> {
   }
 
   void _startFrameTimer() {
-    _frameTimer?.cancel();
+    _frameTimer.cancel();
     _frameTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!_answered) {
         setState(() => _frameIndex = (_frameIndex + 1) % _maxFrames);
@@ -326,15 +326,6 @@ class _BrandModelQuizPageState extends State<BrandModelQuizPage> {
         .join();
   }
 
-  Widget _buildStaticModelImage(int i) {
-    final fileBase = _formatImageName(widget.brand, _correctAnswer);
-    return Image(
-      image: ImageCacheService.instance.imageProvider('$fileBase$i.webp'),
-      height: 160,
-      width: double.infinity,
-      fit: BoxFit.cover,
-    );
-  }
 
   void _onOptionTap(String selection) {
     

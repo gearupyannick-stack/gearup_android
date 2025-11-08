@@ -152,7 +152,7 @@ class _PremiumPageState extends State<PremiumPage> with SingleTickerProviderStat
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(
-                        'GearUp Premium',
+                        'premium.title'.tr(),
                         style: theme.textTheme.titleLarge?.copyWith(color: Colors.white),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -338,39 +338,82 @@ class _PremiumPageState extends State<PremiumPage> with SingleTickerProviderStat
                         // Price and CTA
                         _buildBuyArea(context),
 
-                        // small legal / note
-                        const SizedBox(height: 8),
-                        Text('Available on all devices. Restores automatically on reinstall.', style: const TextStyle(fontSize: 12, color: Colors.white60)),
-                      ],
-                    ),
+                                          // small legal / note
+                  const SizedBox(height: 8),
+                  Text(
+                    tr('premium.legalNote'),
+                    style: const TextStyle(fontSize: 12, color: Colors.white60),
                   ),
-
-                  // FAQ / Extra info
-                  const SizedBox(height: 18),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(12)),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('Why upgrade?', style: const TextStyle(fontWeight: FontWeight.bold)),
-                        const SizedBox(height: 8),
-                        Text('- Faster progression and unlimited retries.\n- Better experience without ads.\n- Supports development of new features.', style: const TextStyle(fontSize: 13, color: Colors.white70)),
-                      ],
-                    ),
-                  ),
-
-                  const SizedBox(height: 26),
-                  // Developer note / product id
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Opacity(opacity: 0.65, child: Text('Product ID: $_productId', style: const TextStyle(fontSize: 12))),
-                  ),
-                  const SizedBox(height: 32),
                 ],
               ),
             ),
+
+            // FAQ / Extra info
+            const SizedBox(height: 18),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(12)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(tr('premium.faq.title'), style: const TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+
+                  // Bulleted list — one localization string per bullet
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Bullet 1
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('• ', style: TextStyle(fontSize: 16)),
+                          Expanded(child: Text(tr('premium.faq.bullet1'), style: const TextStyle(fontSize: 13, color: Colors.white70))),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+
+                      // Bullet 2
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('• ', style: TextStyle(fontSize: 16)),
+                          Expanded(child: Text(tr('premium.faq.bullet2'), style: const TextStyle(fontSize: 13, color: Colors.white70))),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+
+                      // Bullet 3
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('• ', style: TextStyle(fontSize: 16)),
+                          Expanded(child: Text(tr('premium.faq.bullet3'), style: const TextStyle(fontSize: 13, color: Colors.white70))),
+                        ],
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 26),
+            // Developer note / product id (localized, with placeholder)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Opacity(
+                opacity: 0.65,
+                child: Text(
+                  tr('premium.productId', namedArgs: {'id': _productId}),
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ),
+            ),
+            const SizedBox(height: 32),
+          ],
+        ),
+      ),
     );
   }
 }

@@ -1916,12 +1916,30 @@ class _PlayCalendarWidgetState extends State<PlayCalendarWidget> {
   late int currentYear;
   late int currentMonth;
 
-  static const List<String> weekDays = [
-    'Mon','Tue','Wed','Thu','Fri','Sat','Sun'
+  // Replace the previous static const lists with these getters that pull from assets
+  List<String> get weekDays => [
+    tr('calendar.weekdays.mon'),
+    tr('calendar.weekdays.tue'),
+    tr('calendar.weekdays.wed'),
+    tr('calendar.weekdays.thu'),
+    tr('calendar.weekdays.fri'),
+    tr('calendar.weekdays.sat'),
+    tr('calendar.weekdays.sun'),
   ];
-  static const List<String> monthNames = [
-    "January","February","March","April","May","June",
-    "July","August","September","October","November","December"
+
+  List<String> get monthNames => [
+    tr('calendar.months.january'),
+    tr('calendar.months.february'),
+    tr('calendar.months.march'),
+    tr('calendar.months.april'),
+    tr('calendar.months.may'),
+    tr('calendar.months.june'),
+    tr('calendar.months.july'),
+    tr('calendar.months.august'),
+    tr('calendar.months.september'),
+    tr('calendar.months.october'),
+    tr('calendar.months.november'),
+    tr('calendar.months.december'),
   ];
 
   @override

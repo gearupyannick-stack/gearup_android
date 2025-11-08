@@ -1,9 +1,10 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:easy_localization/easy_localization.dart';
+import 'package:csv/csv.dart';
 import '../services/image_service_cache.dart';
 import '../services/audio_feedback.dart';
+import '../services/language_service.dart';
 
 
 class LibraryPage extends StatefulWidget {
@@ -28,26 +29,35 @@ class _LibraryPageState extends State<LibraryPage> {
 
   Future<void> _loadCsvData() async {
     final rawCsv = await rootBundle.loadString('assets/cars.csv');
-    final lines = const LineSplitter().convert(rawCsv);
+    final List<List<dynamic>> rows = const CsvToListConverter(eol: '\n').convert(rawCsv);
     final temp = <Map<String, String>>[];
-    for (var line in lines) {
-      final values = line.split(',');
-      if (values.length >= 11) {
+    final descIndex = LanguageService.getDescriptionIndex(context);
+    final featureIndex = LanguageService.getSpecialFeatureIndex(context);
+
+    print('DEBUG: Total rows parsed: ${rows.length}');
+    print('DEBUG: descIndex=$descIndex, featureIndex=$featureIndex');
+
+    for (var values in rows) {
+      print('DEBUG: Row has ${values.length} columns');
+      if (values.length >= descIndex + 1 && values.length >= featureIndex + 1) {
         temp.add({
-          'brand': values[0].trim(),
-          'model': values[1].trim(),
-          'description': values[2].trim(),
-          'engineType': values[3].trim(),
-          'topSpeed': values[4].trim(),
-          'acceleration': values[5].trim(),
-          'horsepower': values[6].trim(),
-          'priceRange': values[7].trim(),
-          'year': values[8].trim(),
-          'origin': values[9].trim(),
-          'notableFeature': values[10].trim(),
+          'brand': values[0].toString().trim(),
+          'model': values[1].toString().trim(),
+          'description': values[descIndex].toString().trim(),
+          'engineType': values[3].toString().trim(),
+          'topSpeed': values[4].toString().trim(),
+          'acceleration': values[5].toString().trim(),
+          'horsepower': values[6].toString().trim(),
+          'priceRange': values[7].toString().trim(),
+          'year': values[8].toString().trim(),
+          'origin': values[9].toString().trim(),
+          'notableFeature': values[featureIndex].toString().trim(),
         });
+      } else {
+        print('DEBUG: Skipping row with ${values.length} columns (need at least ${featureIndex + 1})');
       }
     }
+    print('DEBUG: Total cars loaded: ${temp.length}');
     setState(() => cars = temp);
   }
 
@@ -144,9 +154,9 @@ class _LibraryPageState extends State<LibraryPage> {
                       color: Colors.black,
                       alignment: Alignment.center,
                       padding: const EdgeInsets.all(8),
-                      child: const Text(
-                        'More brands coming soon',
-                        style: TextStyle(
+                      child: Text(
+                        'library.MoreBrandsComingSoon'.tr(),
+                        style: const TextStyle(
                           color: Colors.white,
                           fontSize: 16,
                           fontWeight: FontWeight.bold,

@@ -1,14 +1,15 @@
 // lib/pages/challenges/special_feature_challenge_page.dart
 
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:easy_localization/easy_localization.dart';
+import 'package:csv/csv.dart';
 import '../../services/audio_feedback.dart'; // added by audio patch
 
 import '../../services/image_service_cache.dart'; // ← Utilisation du cache local
+import '../../services/language_service.dart';
 
 class SpecialFeatureChallengePage extends StatefulWidget {
   @override
@@ -97,15 +98,15 @@ super.dispose();
 
   Future<void> _loadCsv() async {
     final raw = await rootBundle.loadString('assets/cars.csv');
-    final lines = const LineSplitter().convert(raw);
-    for (var line in lines) {
-      final parts = line.split(',');
-      // ensure we have at least 11 columns: notableFeature at index 10
-      if (parts.length > 10) {
+    final List<List<dynamic>> rows = const CsvToListConverter(eol: '\n').convert(raw);
+    final featureIndex = LanguageService.getSpecialFeatureIndex(context);
+
+    for (var values in rows) {
+      if (values.length > featureIndex) {
         _carData.add({
-          'brand': parts[0].trim(),
-          'model': parts[1].trim(),
-          'feature': parts[10].trim(),
+          'brand': values[0].toString().trim(),
+          'model': values[1].toString().trim(),
+          'feature': values[featureIndex].toString().trim(),
         });
       }
     }

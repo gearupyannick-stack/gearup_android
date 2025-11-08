@@ -397,16 +397,12 @@ class _PreloadPageState extends State<PreloadPage> {
     final progress = done / total;
 
     // Format estimated size nicely
-    String estimatedSizeText;
     if (_total == 0) {
-      estimatedSizeText = 'Calculating size...';
     } else {
       final kb = (_estimatedBytes / 1024);
       final mb = kb / 1024;
       if (mb >= 1.0) {
-        estimatedSizeText = '${mb.toStringAsFixed(1)} MB (estimated)';
       } else {
-        estimatedSizeText = '${kb.toStringAsFixed(0)} KB (estimated)';
       }
     }
 

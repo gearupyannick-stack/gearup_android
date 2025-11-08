@@ -5,10 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:easy_localization/easy_localization.dart';
+import 'package:csv/csv.dart';
 import '../services/image_service_cache.dart';
 import '../services/audio_feedback.dart';
 import '../services/ad_service.dart';
 import '../services/analytics_service.dart';
+import '../services/language_service.dart';
 
 /// Raw track point definitions for tracks 2 & 3.
 final Map<int, List<Offset>> _tracks = {
@@ -538,7 +540,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
+            Text(
               'You failed several times on this flag. Watch a short video to skip this question and automatically get full credit for it.',
               textAlign: TextAlign.center,
             ),
@@ -641,22 +643,24 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   Future<void> _loadCarData() async {
     try {
       final rawCsv = await rootBundle.loadString('assets/cars.csv');
-      final lines = LineSplitter.split(rawCsv).toList();
-      carData = lines.map<Map<String, String>>((line) {
-        final values = line.split(',');
-        if (values.length >= 11) {
+      final List<List<dynamic>> rows = const CsvToListConverter(eol: '\n').convert(rawCsv);
+      final descIndex = LanguageService.getDescriptionIndex(context);
+      final featureIndex = LanguageService.getSpecialFeatureIndex(context);
+
+      carData = rows.map<Map<String, String>>((values) {
+        if (values.length > descIndex && values.length > featureIndex) {
           return {
-            'brand': values[0],
-            'model': values[1],
-            'description': values[2],
-            'engineType': values[3],
-            'topSpeed': values[4],
-            'acceleration': values[5],
-            'horsepower': values[6],
-            'priceRange': values[7],
-            'year': values[8],
-            'origin': values[9],
-            'specialFeature': values[10],
+            'brand': values[0].toString(),
+            'model': values[1].toString(),
+            'description': values[descIndex].toString(),
+            'engineType': values[3].toString(),
+            'topSpeed': values[4].toString(),
+            'acceleration': values[5].toString(),
+            'horsepower': values[6].toString(),
+            'priceRange': values[7].toString(),
+            'year': values[8].toString(),
+            'origin': values[9].toString(),
+            'specialFeature': values[featureIndex].toString(),
           };
         }
         return {};
@@ -1609,7 +1613,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              "Track $trackNumber" + (unlocked ? "" : " (Locked)"),
+              'home.track'.tr(namedArgs: {'number': trackNumber.toString()}) + (unlocked ? "" : " (${'home.locked'.tr()})"),
               textAlign: TextAlign.center,
               style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
             ),
@@ -1837,7 +1841,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    "Level ${_sessionsCompleted + 1}",
+                    'home.level'.tr(namedArgs: {'number': (_sessionsCompleted + 1).toString()}),
                     style: TextStyle(
                       fontSize: 20,
                       fontWeight: FontWeight.bold,
@@ -2066,15 +2070,14 @@ class _RandomModelBrandQuestionContentState
         children: [
           // Header
           Text(
-            "Question #${widget.questionNumber}  "
-            "Score: ${widget.currentScore}/${widget.totalQuestions}",
+            "questions.questionNumber".tr(namedArgs: {'number': widget.questionNumber.toString()}) + " " + "questions.score".tr(namedArgs: {'current': widget.currentScore.toString(), 'total': widget.totalQuestions.toString()}),
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
 
           // Prompt
-          const Text(
-            "What's the brand of this model ?",
+          Text(
+            "questions.brandOfModel".tr(),
             style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             textAlign: TextAlign.center,
           ),
@@ -2204,13 +2207,12 @@ class _ModelNameToBrandQuestionContentState
       child: Column(
         children: [
           Text(
-            "Question #${widget.questionNumber} – "
-            "Score: ${widget.currentScore}/${widget.totalQuestions}",
+            "questions.questionNumber".tr(namedArgs: {'number': widget.questionNumber.toString()}) + " " + "questions.score".tr(namedArgs: {'current': widget.currentScore.toString(), 'total': widget.totalQuestions.toString()}),
             style: TextStyle(fontSize: 12),
           ),
           SizedBox(height: 30),
           Text(
-            "Which brand makes the model:",
+            "questions.brandMakesModel".tr(),
             style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
             textAlign: TextAlign.center,
           ),
@@ -2329,15 +2331,14 @@ class _DescriptionSlideshowQuestionContentState
         children: [
           // ── Header ────────────────────────────────────────────────
           Text(
-            "Question #${widget.questionNumber}   "
-            "Score: ${widget.currentScore}/${widget.totalQuestions}",
+            "questions.questionNumber".tr(namedArgs: {'number': widget.questionNumber.toString()}) + " " + "questions.score".tr(namedArgs: {'current': widget.currentScore.toString(), 'total': widget.totalQuestions.toString()}),
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
 
           // ── Prompt ────────────────────────────────────────────────
-          const Text(
-            "Which description corresponds to this car ?",
+          Text(
+            "questions.descriptionMatch".tr(),
             style: TextStyle(fontSize: 20, fontWeight: FontWeight.normal),
             textAlign: TextAlign.center,
           ),
@@ -2480,13 +2481,12 @@ class _HorsepowerQuestionContentState
         children: [
           // Header
           Text(
-            "Question #${widget.questionNumber} – "
-            "Score: ${widget.currentScore}/${widget.totalQuestions}",
+            "questions.questionNumber".tr(namedArgs: {'number': widget.questionNumber.toString()}) + " " + "questions.score".tr(namedArgs: {'current': widget.currentScore.toString(), 'total': widget.totalQuestions.toString()}),
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
-          const Text(
-            "How many HorsePower does this car has ?",
+          Text(
+            "questions.horsePower".tr(),
             style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             textAlign: TextAlign.center,
           ),
@@ -2638,15 +2638,14 @@ class _AccelerationQuestionContentState
         children: [
           // Header
           Text(
-            "Question #${widget.questionNumber} – "
-            "Score: ${widget.currentScore}/${widget.totalQuestions}",
+            "questions.questionNumber".tr(namedArgs: {'number': widget.questionNumber.toString()}) + " " + "questions.score".tr(namedArgs: {'current': widget.currentScore.toString(), 'total': widget.totalQuestions.toString()}),
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
 
           // Prompt
-          const Text(
-            "What's the acceleration time (0-100km/h) of this car ?",
+          Text(
+            "questions.acceleration".tr(),
             style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             textAlign: TextAlign.center,
           ),
@@ -2799,15 +2798,14 @@ class _MaxSpeedQuestionContentState
         children: [
           // Header
           Text(
-            "Question #${widget.questionNumber} – "
-            "Score: ${widget.currentScore}/${widget.totalQuestions}",
+            "questions.questionNumber".tr(namedArgs: {'number': widget.questionNumber.toString()}) + " " + "questions.score".tr(namedArgs: {'current': widget.currentScore.toString(), 'total': widget.totalQuestions.toString()}),
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
 
           // Prompt
-          const Text(
-            "What's the max speed of this car ?",
+          Text(
+            "questions.maxSpeed".tr(),
             style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             textAlign: TextAlign.center,
           ),
@@ -2959,15 +2957,14 @@ class _SpecialFeatureQuestionContentState
         children: [
           // Header
           Text(
-            "Question #${widget.questionNumber} – "
-            "Score: ${widget.currentScore}/${widget.totalQuestions}",
+            "questions.questionNumber".tr(namedArgs: {'number': widget.questionNumber.toString()}) + " " + "questions.score".tr(namedArgs: {'current': widget.currentScore.toString(), 'total': widget.totalQuestions.toString()}),
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
 
           // Prompt
-          const Text(
-            "WHich special feature does this car has ?",
+          Text(
+            "questions.specialFeature".tr(),
             style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             textAlign: TextAlign.center,
           ),
@@ -3116,8 +3113,7 @@ class _DescriptionToCarImageQuestionContentState
         children: [
           // Header
           Text(
-            "Question #${widget.questionNumber} – "
-            "Score: ${widget.currentScore}/${widget.totalQuestions}",
+            "questions.questionNumber".tr(namedArgs: {'number': widget.questionNumber.toString()}) + " " + "questions.score".tr(namedArgs: {'current': widget.currentScore.toString(), 'total': widget.totalQuestions.toString()}),
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
@@ -3270,15 +3266,14 @@ class _BrandImageChoiceQuestionContentState
       children: [
         // Header
         Text(
-          "Question #${widget.questionNumber} – "
-          "Score: ${widget.currentScore}/${widget.totalQuestions}",
+          "questions.questionNumber".tr(namedArgs: {'number': widget.questionNumber.toString()}) + " " + "questions.score".tr(namedArgs: {'current': widget.currentScore.toString(), 'total': widget.totalQuestions.toString()}),
           style: const TextStyle(fontSize: 12),
         ),
         const SizedBox(height: 20),
 
         // Prompt
         Text(
-          "Which image represent the ${widget.targetBrand} ?",
+          'questions.brandImage'.tr(namedArgs: {'brand': widget.targetBrand}),
           style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
           textAlign: TextAlign.center,
         ),
@@ -3426,15 +3421,14 @@ class _OriginCountryQuestionContentState
         children: [
           // Header
           Text(
-            "Question #${widget.questionNumber} – "
-            "Score: ${widget.currentScore}/${widget.totalQuestions}",
+            "questions.questionNumber".tr(namedArgs: {'number': widget.questionNumber.toString()}) + " " + "questions.score".tr(namedArgs: {'current': widget.currentScore.toString(), 'total': widget.totalQuestions.toString()}),
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
 
           // Prompt
-          const Text(
-            "Which country does this car come from ?",
+          Text(
+            "questions.origin".tr(),
             style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             textAlign: TextAlign.center,
           ),
@@ -3583,13 +3577,12 @@ class _ModelOnlyImageQuestionContentState
         children: [
           // En-tête
           Text(
-            "Question #${widget.questionNumber} – "
-            "Score: ${widget.currentScore}/${widget.totalQuestions}",
+            "questions.questionNumber".tr(namedArgs: {'number': widget.questionNumber.toString()}) + " " + "questions.score".tr(namedArgs: {'current': widget.currentScore.toString(), 'total': widget.totalQuestions.toString()}),
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
-          const Text(
-            "What is this model ?",
+          Text(
+            "questions.modelName".tr(),
             style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             textAlign: TextAlign.center,
           ),
@@ -3719,15 +3712,14 @@ class _RandomCarImageQuestionContentState
         children: [
           // Header
           Text(
-            "Question #${widget.questionNumber}  "
-            "Score: ${widget.currentScore}/${widget.totalQuestions}",
+            "questions.questionNumber".tr(namedArgs: {'number': widget.questionNumber.toString()}) + " " + "questions.score".tr(namedArgs: {'current': widget.currentScore.toString(), 'total': widget.totalQuestions.toString()}),
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
 
           // Prompt (changed)
-          const Text(
-            "Which car is this ?",
+          Text(
+            "questions.whichCar".tr(),
             style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             textAlign: TextAlign.center,
           ),

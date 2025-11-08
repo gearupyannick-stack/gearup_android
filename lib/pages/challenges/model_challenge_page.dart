@@ -32,7 +32,6 @@ class _ModelChallengePageState extends State<ModelChallengePage> {
   Timer? _quizTimer;
 
   // ── Frame animation ──────────────────────────────────────────────────────────
-  static const int _frameCount = 6;
   int    _frameIndex = 0;
   Timer? _frameTimer;
   static const int _maxFrames = 6;
@@ -179,17 +178,6 @@ class _ModelChallengePageState extends State<ModelChallengePage> {
         .join();
   }
 
-  /// Displays the i-th static frame for the current model via cache.
-  Widget _buildStaticModelImage(int i) {
-    final base = _formatImageName(_currentBrand!, _currentModel!);
-    final fileName = '$base$i.webp';
-    return Image(
-      image: ImageCacheService.instance.imageProvider(fileName),
-      height: 160,
-      width: double.infinity,
-      fit: BoxFit.cover,
-    );
-  }
 
   /// Displays the animated frame for a given option via cache.
   Widget _buildOptionImage(Map<String, String> opt) {
@@ -308,7 +296,7 @@ if (_answered) return;
                             shape: BoxShape.circle,
                             color: _frameIndex == index
                                 ? Colors.red
-                                : Colors.grey.withOpacity(0.4),
+                                : Colors.grey,
                           ),
                         ),
                       ),
@@ -441,7 +429,7 @@ if (_answered) return;
                             shape: BoxShape.circle,
                             color: _frameIndex == index
                                 ? Colors.red
-                                : Colors.grey.withOpacity(0.4),
+                                : Colors.grey,
                           ),
                         ),
                       ),

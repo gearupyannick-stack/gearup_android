@@ -74,42 +74,44 @@ class _ProfilePageState extends State<ProfilePage> {
     return unlockedAchievementIds.contains(id);
   }
 
-  final Map<String, List<String>> achievementMap = {
-    '🔸 Track Progression': [
-      'First Flag – Tap your very first flag on any Track.',
-      'Level Complete – Finish Level 1 on Track 1.',
-      'Mid-Track Milestone – Finish Level 5 on Track 1.',
-      'Track Conqueror – Complete all levels on Track 1 (10/10), Track 2 (20/20) or Track 3 (30/30).',
-    ],
-    '🔸 Perfect Runs': [
-      'Clean Slate – Answer every question in a single level correctly (all green flags).',
-      'Zero-Life Loss – Complete a level without ever losing a life.',
-      'Swift Racer – Finish any one level in under 60 seconds (time your elapsedSeconds).',
-    ],
-    '🔸 Gear Mastery': [
-      'Gear Rookie – Earn 100 gears on the Home track.',
-      'Gear Grinder – Accumulate 1,000 gears total.',
-      'Gear Tycoon – Hit 5,000 gears total.',
-    ],
-    '🔸 Gate & Track Unlocks': [
-      'Gate Opener – Unlock your first “LevelLimit” gate.',
-      'Track Unlocker I – Unlock Track 2.',
-      'Track Unlocker II – Unlock Track 3.',
-    ],
-    '🔸 Comeback & Correction': [
-      'Second Chance – Use the “Retry” correction run to turn a red/orange flag green.',
-      'Perseverance – Correct 5 failed flags via correction runs.',
-    ],
-    '🎓 Training Achievements': [
-      'Training Initiate – Complete your 1st training session.',
-      'Training Regular – Hit 10 sessions.',
-      'Training Veteran – Hit 50 sessions.',
-      'Quiz Streak – Score ≥ 10/20 in 5 sessions in a row.',
-      'Sharpshooter – Maintain ≥ 90% accuracy over 200 total question attempts.',
-      'All-Rounder – On one day, score ≥ 10/20 in all 8 modules.',
-      'Training All-Star – Earn 20/20 in all 8 modules (at least once each).',
-    ],
-  };
+  Map<String, List<String>> _getAchievementMap(BuildContext context) {
+    return {
+      'achievements.categories.trackProgression'.tr(): [
+        'achievements.list.firstFlag'.tr(),
+        'achievements.list.levelComplete'.tr(),
+        'achievements.list.midTrackMilestone'.tr(),
+        'achievements.list.trackConqueror'.tr(),
+      ],
+      'achievements.categories.perfectRuns'.tr(): [
+        'achievements.list.cleanSlate'.tr(),
+        'achievements.list.zeroLifeLoss'.tr(),
+        'achievements.list.swiftRacer'.tr(),
+      ],
+      'achievements.categories.gearMastery'.tr(): [
+        'achievements.list.gearRookie'.tr(),
+        'achievements.list.gearGrinder'.tr(),
+        'achievements.list.gearTycoon'.tr(),
+      ],
+      'achievements.categories.gateTrackUnlocks'.tr(): [
+        'achievements.list.gateOpener'.tr(),
+        'achievements.list.trackUnlockerI'.tr(),
+        'achievements.list.trackUnlockerII'.tr(),
+      ],
+      'achievements.categories.comebackCorrection'.tr(): [
+        'achievements.list.secondChance'.tr(),
+        'achievements.list.perseverance'.tr(),
+      ],
+      'achievements.categories.trainingAchievements'.tr(): [
+        'achievements.list.trainingInitiate'.tr(),
+        'achievements.list.trainingRegular'.tr(),
+        'achievements.list.trainingVeteran'.tr(),
+        'achievements.list.quizStreak'.tr(),
+        'achievements.list.sharpshooter'.tr(),
+        'achievements.list.allRounder'.tr(),
+        'achievements.list.trainingAllStar'.tr(),
+      ],
+    };
+  }
 
   @override
   void initState() {
@@ -174,7 +176,7 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   String _getDisplayNameFromId(String id) {
-    for (final entry in achievementMap.entries) {
+    for (final entry in _getAchievementMap(context).entries) {
       for (final name in entry.value) {
         if (_getAchievementIdFromName(name) == id) {
           return name.split("–")[0].trim();
@@ -486,7 +488,7 @@ class _ProfilePageState extends State<ProfilePage> {
     showDialog(
       context: context,
       builder: (ctx) {
-        final allNames = achievementMap.entries.expand((e) => e.value).toList();
+        final allNames = _getAchievementMap(context).entries.expand((e) => e.value).toList();
         return AlertDialog(
           title: Text('profile.achievements'.tr()),
           content: SizedBox(
@@ -672,8 +674,9 @@ class _ProfilePageState extends State<ProfilePage> {
                     try {
                       await LanguageService.changeLanguage(context, langCode);
                       if (!mounted) return;
+                      final languageName = LanguageService.getLanguageName(langCode);
                       ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('language.languageChanged'.tr())),
+                        SnackBar(content: Text('language.languageChanged'.tr(namedArgs: {'language': languageName}))),
                       );
                     } catch (e) {
                       if (!mounted) return;
@@ -847,7 +850,7 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   void _showUnlockedAchievementsPopup(BuildContext context) {
-    final unlocked = achievementMap.entries
+    final unlocked = _getAchievementMap(context).entries
         .expand((e) => e.value)
         .where((name) => isUnlocked(name))
         .toList();
@@ -879,7 +882,7 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   void _showLockedAchievementsPopup(BuildContext context) {
-    final locked = achievementMap.entries
+    final locked = _getAchievementMap(context).entries
         .expand((e) => e.value)
         .where((name) => !isUnlocked(name))
         .toList();
@@ -1240,7 +1243,7 @@ class _ProfilePageState extends State<ProfilePage> {
         ? ((correctAnswerCount / questionAttemptCount) * 100).round()
         : 0;
 
-    final allAchievements = achievementMap.entries.expand((e) => e.value).toList();
+    final allAchievements = _getAchievementMap(context).entries.expand((e) => e.value).toList();
     final unlocked = allAchievements.where((name) => isUnlocked(name)).toList();
     final locked = allAchievements.where((name) => !isUnlocked(name)).toList();
     final topRow = List<String>.from(unlocked.take(3));
@@ -1397,7 +1400,7 @@ class _ProfilePageState extends State<ProfilePage> {
                               Column(
                                 mainAxisAlignment: MainAxisAlignment.center,
                                 children: [
-                                  const Icon(Icons.emoji_events, size: 60, color: Colors.amber),
+                                  Icon(Icons.emoji_events, size: 60, color: Colors.yellow[700]!),
                                   const SizedBox(height: 6),
                                   Padding(
                                     padding: const EdgeInsets.symmetric(horizontal: 6),

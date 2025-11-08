@@ -43,7 +43,6 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
   String? _selectedBrand;
   String? _selectedModel;
 
-  static const int _maxImageIndex = 5; // cycle 0…5
   static const int _maxFrames = 6; // Total frames (0-5)
 
   @override
@@ -249,16 +248,6 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
         .join();
   }
 
-  Widget _buildStaticModelImage(int i) {
-    final base = _fileBase(randomBrand!, randomModel!);
-    final fileName = '$base$i.webp';
-    return Image(
-      image: ImageCacheService.instance.imageProvider(fileName),
-      height: 160,
-      width: double.infinity,
-      fit: BoxFit.cover,
-    );
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -359,7 +348,7 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
                             shape: BoxShape.circle,
                             color: _brandQuestionImageIndex == index
                                 ? Colors.red
-                                : Colors.grey.withOpacity(0.4),
+                                : Colors.grey,
                           ),
                         ),
                       ),
@@ -508,7 +497,7 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
                             color: (_currentImageIndices.isNotEmpty &&
                                     _currentImageIndices[0] == index)
                                 ? Colors.red
-                                : Colors.grey.withOpacity(0.4),
+                                : Colors.grey,
                           ),
                         ),
                       ),
