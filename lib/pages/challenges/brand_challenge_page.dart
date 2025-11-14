@@ -7,6 +7,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:easy_localization/easy_localization.dart';
 import '../../services/audio_feedback.dart';
+import '../../widgets/enhanced_answer_button.dart';
+import '../../widgets/question_progress_bar.dart';
+import '../../widgets/animated_score_display.dart';
+import '../../widgets/challenge_completion_dialog.dart';
 
 import '../../services/image_service_cache.dart'; // ← Utilisation du cache local
 
@@ -27,6 +31,11 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
   int correctAnswers = 0;
   int elapsedSeconds = 0;
   Timer? _questionTimer;
+  List<bool> _answerHistory = [];
+
+  int _currentStreak = 0;
+  bool _showScoreChange = false;
+  bool _wasLastAnswerCorrect = false;
 
   bool isBrandQuestion = true;
   String? randomBrand;
@@ -207,29 +216,18 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
 
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('challenges.complete'.tr()),
-        content: Text(
-          'challenges.score'.tr(namedArgs: {
-            'score': correctAnswers.toString(),
-            'total': '20'
-          }) +
-          ' in ${elapsedSeconds ~/ 60}m '
-          '${(elapsedSeconds % 60).toString().padLeft(2, '0')}s',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              if (correctAnswers >= 10) {
-                Navigator.of(context).pop(true);
-              } else {
-                Navigator.pop(context,'$correctAnswers/20 in ${elapsedSeconds ~/ 60}\'${(elapsedSeconds % 60).toString().padLeft(2, '0')}\'\'',);
-              }
-            },
-            child: Text('common.ok'.tr()),
-          ),
-        ],
+      barrierDismissible: false,
+      builder: (ctx) => ChallengeCompletionDialog(
+        correctAnswers: correctAnswers,
+        totalQuestions: 20,
+        totalSeconds: elapsedSeconds,
+        onClose: () {
+          Navigator.of(ctx).pop();
+          Navigator.pop(
+            context,
+            '$correctAnswers/20 in ${elapsedSeconds ~/ 60}\'${(elapsedSeconds % 60).toString().padLeft(2, '0')}\'\'',
+          );
+        },
       ),
     );
   }
@@ -271,19 +269,24 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
       ),
       body: randomBrand == null
           ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                children: [
-                  Text(
-                    'challenges.score'.tr(namedArgs: {
-                      'score': correctAnswers.toString(),
-                      'total': '20'
-                    }),
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
+          : Column(
+              children: [
+                QuestionProgressBar(
+                  currentQuestion: questionCount,
+                  totalQuestions: 20,
+                  answeredCorrectly: _answerHistory,
+                ),
+                Expanded(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                  AnimatedScoreDisplay(
+                    currentScore: correctAnswers,
+                    totalQuestions: 20,
+                    currentStreak: _currentStreak,
+                    showScoreChange: _showScoreChange,
+                    wasCorrect: _wasLastAnswerCorrect,
                   ),
                   const SizedBox(height: 16),
 
@@ -355,38 +358,17 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
                     ),
                     const SizedBox(height: 24),
                     for (var b in brandOptions)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 6.0),
-                        child: SizedBox(
-                          width: double.infinity,
-                          height: 50,
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(12),
-                            child: Material(
-                              color: _answered
-                                  ? (b == randomBrand
-                                      ? Colors.green
-                                      : (b == _selectedBrand
-                                          ? Colors.red
-                                          : Colors.grey[800]!))
-                                  : Colors.grey[800],
-                              child: InkWell(
-                                onTap: () { try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {};
-                              _onBrandTap(b); },
-                                child: Center(
-                                  child: Text(
-                                    b,
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
+                      EnhancedAnswerButton(
+                        text: b,
+                        backgroundColor: _answered
+                            ? (b == randomBrand
+                                ? Colors.green
+                                : (b == _selectedBrand
+                                    ? Colors.red
+                                    : Colors.grey[800]!))
+                            : Colors.grey[800]!,
+                        onTap: () => _onBrandTap(b),
+                        isDisabled: _answered,
                       ),
                   ] else ...[
                     // ── IMAGE-GRID MODE ────────────────────────────────────────
@@ -419,6 +401,8 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
                           child: ClipRRect(
                             borderRadius: BorderRadius.circular(12),
                             child: Material(
+                              elevation: 4,
+                              borderRadius: BorderRadius.circular(12),
                               color: Colors.grey[900],
                               child: InkWell(
                                 onTap: () { try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {};
@@ -503,33 +487,76 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
                       ),
                     ),
                   ],
-                ],
-              ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
     );
   }
 
   void _onBrandTap(String brand) {
-    
+
     try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
 if (_answered) return;
+    final isCorrect = brand == randomBrand;
     setState(() {
       _selectedBrand = brand;
       _answered = true;
-      if (brand == randomBrand) correctAnswers++;
+      if (isCorrect) correctAnswers++;
+      _answerHistory.add(isCorrect);
+
+      if (isCorrect) {
+        _currentStreak++;
+      } else {
+        _currentStreak = 0;
+      }
+      _wasLastAnswerCorrect = isCorrect;
+      _showScoreChange = true;
     });
+
+    // Reset the animation flag after a short delay
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (mounted) {
+        setState(() {
+          _showScoreChange = false;
+        });
+      }
+    });
+
     Future.delayed(const Duration(seconds: 1), _nextQuestion);
   }
 
   void _onModelTap(String model) {
-    
+
     try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
 if (_answered) return;
+    final isCorrect = model == randomModel;
     setState(() {
       _selectedModel = model;
       _answered = true;
-      if (model == randomModel) correctAnswers++;
+      if (isCorrect) correctAnswers++;
+      _answerHistory.add(isCorrect);
+
+      if (isCorrect) {
+        _currentStreak++;
+      } else {
+        _currentStreak = 0;
+      }
+      _wasLastAnswerCorrect = isCorrect;
+      _showScoreChange = true;
     });
+
+    // Reset the animation flag after a short delay
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (mounted) {
+        setState(() {
+          _showScoreChange = false;
+        });
+      }
+    });
+
     Future.delayed(const Duration(seconds: 1), _nextQuestion);
   }
 }

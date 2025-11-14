@@ -1472,7 +1472,7 @@ class _ProfilePageState extends State<ProfilePage> {
                     child: CircularProgressIndicator(
                       value: _progressValue,
                       backgroundColor: Colors.grey[800],
-                      valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF4CAF50)),
+                      valueColor: AlwaysStoppedAnimation<Color>(Theme.of(context).primaryColor),
                       strokeWidth: 12,
                     ),
                   ),
@@ -1511,7 +1511,7 @@ class _ProfilePageState extends State<ProfilePage> {
               const Icon(Icons.settings, color: Colors.amber, size: 20),
               const SizedBox(width: 6),
               Text(
-                'Total Gears: $_gearCount',
+                'profileProgress.totalGears'.tr(namedArgs: {'count': _gearCount.toString()}),
                 style: const TextStyle(color: Colors.white70, fontSize: 14),
               ),
             ],
@@ -1533,7 +1533,7 @@ class _ProfilePageState extends State<ProfilePage> {
               const Icon(Icons.settings, color: Colors.amber, size: 28),
               const SizedBox(width: 12),
               Text(
-                'Total Gears: $_gearCount',
+                'profileProgress.totalGears'.tr(namedArgs: {'count': _gearCount.toString()}),
                 style: const TextStyle(color: Colors.white, fontSize: 20),
               ),
             ],
@@ -1544,11 +1544,11 @@ class _ProfilePageState extends State<ProfilePage> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  _buildTrackCard(1, 'Beginner', 0, 750, const Color(0xFF2196F3)),
+                  _buildTrackCard(1, 'profileProgress.trackNames.beginner'.tr(), 0, 750, const Color(0xFF2196F3)),
                   const SizedBox(height: 12),
-                  _buildTrackCard(2, 'Intermediate', 750, 3250, const Color(0xFFFF9800)),
+                  _buildTrackCard(2, 'profileProgress.trackNames.intermediate'.tr(), 750, 3250, const Color(0xFFFF9800)),
                   const SizedBox(height: 12),
-                  _buildTrackCard(3, 'Advanced', 3250, 999999, const Color(0xFF9C27B0)),
+                  _buildTrackCard(3, 'profileProgress.trackNames.advanced'.tr(), 3250, 999999, const Color(0xFF9C27B0)),
                 ],
               ),
             ),
@@ -1621,7 +1621,7 @@ class _ProfilePageState extends State<ProfilePage> {
                   ),
                   const SizedBox(width: 8),
                   Text(
-                    'Track $trackNumber: $trackName',
+                    'profileProgress.trackCard.trackLabel'.tr(namedArgs: {'number': trackNumber.toString(), 'name': trackName}),
                     style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.bold,
@@ -1637,22 +1637,24 @@ class _ProfilePageState extends State<ProfilePage> {
                     color: color.withOpacity(0.2),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: const Text(
-                    'CURRENT',
-                    style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white),
+                  child: Text(
+                    'profileProgress.trackCard.current'.tr(),
+                    style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.white),
                   ),
                 ),
             ],
           ),
           const SizedBox(height: 8),
           Text(
-            maxGears < 999999 ? '$minGears - $maxGears gears' : '$minGears+ gears',
+            maxGears < 999999
+              ? 'profileProgress.trackCard.gearsRange'.tr(namedArgs: {'min': minGears.toString(), 'max': maxGears.toString()})
+              : 'profileProgress.trackCard.gearsPlusRange'.tr(namedArgs: {'min': minGears.toString()}),
             style: TextStyle(fontSize: 12, color: isUnlocked ? Colors.white70 : Colors.grey),
           ),
           if (isUnlocked && !isCompleted) ...[
             const SizedBox(height: 12),
             Text(
-              'Level $currentLevel/$levelsInTrack',
+              'profileProgress.trackCard.levelProgress'.tr(namedArgs: {'current': currentLevel.toString(), 'total': levelsInTrack.toString()}),
               style: TextStyle(fontSize: 14, color: color, fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: 6),
@@ -1664,7 +1666,7 @@ class _ProfilePageState extends State<ProfilePage> {
             ),
             const SizedBox(height: 4),
             Text(
-              '$gearsInTrack gears collected',
+              'profileProgress.trackCard.gearsCollected'.tr(namedArgs: {'count': gearsInTrack.toString()}),
               style: const TextStyle(fontSize: 12, color: Colors.white54),
             ),
           ],
@@ -1674,9 +1676,9 @@ class _ProfilePageState extends State<ProfilePage> {
               children: [
                 const Icon(Icons.emoji_events, color: Colors.amber, size: 16),
                 const SizedBox(width: 6),
-                const Text(
-                  'Track Completed!',
-                  style: TextStyle(fontSize: 12, color: Colors.amber, fontWeight: FontWeight.w600),
+                Text(
+                  'profileProgress.trackCard.trackCompleted'.tr(),
+                  style: const TextStyle(fontSize: 12, color: Colors.amber, fontWeight: FontWeight.w600),
                 ),
               ],
             ),
@@ -1697,9 +1699,9 @@ class _ProfilePageState extends State<ProfilePage> {
             children: [
               const Icon(Icons.local_fire_department, color: Colors.orange, size: 32),
               const SizedBox(width: 12),
-              const Text(
-                'Your Streak',
-                style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
+              Text(
+                'profileProgress.streak.title'.tr(),
+                style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
               ),
             ],
           ),
@@ -1731,7 +1733,7 @@ class _ProfilePageState extends State<ProfilePage> {
                           ),
                         ),
                         Text(
-                          dailyStreak == 1 ? 'Day Streak' : 'Days Streak',
+                          dailyStreak == 1 ? 'profileProgress.streak.dayStreak'.tr() : 'profileProgress.streak.daysStreak'.tr(),
                           style: const TextStyle(
                             fontSize: 18,
                             color: Colors.white70,
@@ -1742,11 +1744,11 @@ class _ProfilePageState extends State<ProfilePage> {
                   ),
                   const SizedBox(height: 20),
                   // Stats
-                  _buildStreakStatRow(Icons.trending_up, 'Current Streak', '$dailyStreak days'),
+                  _buildStreakStatRow(Icons.trending_up, 'profileProgress.streak.currentStreak'.tr(), 'profileProgress.streak.streakDays'.tr(namedArgs: {'count': dailyStreak.toString()})),
                   const Divider(color: Colors.white24),
-                  _buildStreakStatRow(Icons.emoji_events, 'Longest Streak', '$dailyStreak days'),
+                  _buildStreakStatRow(Icons.emoji_events, 'profileProgress.streak.longestStreak'.tr(), 'profileProgress.streak.streakDays'.tr(namedArgs: {'count': dailyStreak.toString()})),
                   const Divider(color: Colors.white24),
-                  _buildStreakStatRow(Icons.calendar_today, 'Total Active Days', '$dailyStreak'),
+                  _buildStreakStatRow(Icons.calendar_today, 'profileProgress.streak.totalActiveDays'.tr(), dailyStreak.toString()),
                   const SizedBox(height: 20),
                   // Motivation message
                   if (dailyStreak >= 7)
@@ -1763,8 +1765,8 @@ class _ProfilePageState extends State<ProfilePage> {
                           Expanded(
                             child: Text(
                               dailyStreak >= 30
-                                  ? '🔥 Amazing! You\'re on fire! Keep it up!'
-                                  : '🎉 Great job! Keep going!',
+                                  ? 'profileProgress.streak.encouragement.onFire'.tr()
+                                  : 'profileProgress.streak.encouragement.greatJob'.tr(),
                               style: const TextStyle(color: Colors.white70, fontSize: 14),
                             ),
                           ),
@@ -1785,8 +1787,8 @@ class _ProfilePageState extends State<ProfilePage> {
                           Expanded(
                             child: Text(
                               dailyStreak == 0
-                                  ? 'Start your streak today! Come back daily to build it up.'
-                                  : 'Keep going! ${7 - dailyStreak} more days to reach a week!',
+                                  ? 'profileProgress.streak.encouragement.startToday'.tr()
+                                  : 'profileProgress.streak.encouragement.keepGoing'.tr(namedArgs: {'remaining': (7 - dailyStreak).toString()}),
                               style: const TextStyle(color: Colors.white70, fontSize: 14),
                             ),
                           ),
@@ -1855,15 +1857,29 @@ class _ProfilePageState extends State<ProfilePage> {
             style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
           ),
           const SizedBox(height: 16),
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
+          Column(
             children: [
-              _buildModernStatCard('profile.trainingSessions'.tr(), trainingCompletedCount.toString(), Icons.fitness_center, const Color(0xFF2196F3)),
-              _buildModernStatCard('profile.correctAnswers'.tr(), correctAnswerCount.toString(), Icons.check_circle, const Color(0xFF4CAF50)),
-              _buildModernStatCard('profile.categoriesMastered'.tr(), '$categoriesMastered/8', Icons.category, const Color(0xFFFF9800)),
-              _buildModernStatCard('profile.challengesAttempted'.tr(), challengesAttemptedCount.toString(), Icons.flag, const Color(0xFFE91E63)),
-              _buildModernStatCard('profile.accuracy'.tr(), '$accuracy%', Icons.bar_chart, const Color(0xFF9C27B0)),
+              Row(
+                children: [
+                  _buildModernStatCard('profile.trainingSessions'.tr(), trainingCompletedCount.toString(), Icons.fitness_center, const Color(0xFF2196F3)),
+                  const SizedBox(width: 12),
+                  _buildModernStatCard('profile.correctAnswers'.tr(), correctAnswerCount.toString(), Icons.check_circle, const Color(0xFF4CAF50)),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  _buildModernStatCard('profile.categoriesMastered'.tr(), '$categoriesMastered/8', Icons.category, const Color(0xFFFF9800)),
+                  const SizedBox(width: 12),
+                  _buildModernStatCard('profile.challengesAttempted'.tr(), challengesAttemptedCount.toString(), Icons.flag, const Color(0xFFE91E63)),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  _buildModernStatCard('profile.accuracy'.tr(), '$accuracy%', Icons.bar_chart, const Color(0xFF9C27B0)),
+                ],
+              ),
             ],
           ),
         ],
@@ -1872,40 +1888,38 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   Widget _buildModernStatCard(String title, String value, IconData icon, Color color) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // Calculate width to fit exactly 2 cards per row with spacing
-        final parentWidth = MediaQuery.of(context).size.width - 32; // 16px padding on each side
-        final cardWidth = (parentWidth - 20 - 12) / 2; // Subtract card padding and spacing
-
-        return Container(
-          width: cardWidth,
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: const Color(0xFF1E1E1E),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: color.withOpacity(0.3), width: 1),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(icon, size: 32, color: color),
-              const SizedBox(height: 8),
-              Text(
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1E1E1E),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withOpacity(0.3), width: 1),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 32, color: color),
+            const SizedBox(height: 8),
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
                 value,
                 style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.white),
               ),
-              const SizedBox(height: 4),
-              Text(
-                title,
-                style: const TextStyle(fontSize: 12, color: Colors.white70),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ],
-          ),
-        );
-      },
+            ),
+            const SizedBox(height: 4),
+            Text(
+              title,
+              style: const TextStyle(fontSize: 12, color: Colors.white70),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1940,9 +1954,9 @@ class _ProfilePageState extends State<ProfilePage> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text(
-                '📚 Knowledge Mastered',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
+              Text(
+                'profileProgress.knowledge.title'.tr(),
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
               ),
               Text(
                 '$categoriesMastered/8',
@@ -1965,6 +1979,20 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   Widget _buildKnowledgeRow(String title, IconData icon) {
+    // Map English category names to translation keys
+    final translationKeyMap = {
+      'Brand': 'profileProgress.knowledge.categories.brand',
+      'Model': 'profileProgress.knowledge.categories.model',
+      'Origin': 'profileProgress.knowledge.categories.origin',
+      'Engine Type': 'profileProgress.knowledge.categories.engineType',
+      'Max Speed': 'profileProgress.knowledge.categories.maxSpeed',
+      'Acceleration': 'profileProgress.knowledge.categories.acceleration',
+      'Power': 'profileProgress.knowledge.categories.power',
+      'Special Feature': 'profileProgress.knowledge.categories.specialFeature',
+    };
+
+    final translatedTitle = translationKeyMap[title]?.tr() ?? title;
+
     return FutureBuilder<int>(
       future: _getCategoryScore(title),
       builder: (context, snapshot) {
@@ -1980,7 +2008,7 @@ class _ProfilePageState extends State<ProfilePage> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                    title,
+                    translatedTitle,
                     style: TextStyle(
                       fontSize: 14,
                       color: isMastered ? Colors.white : Colors.white70,
@@ -1992,7 +2020,7 @@ class _ProfilePageState extends State<ProfilePage> {
                   const Icon(Icons.emoji_events, size: 20, color: Colors.amber)
                 else
                   Text(
-                    '$score/20',
+                    'profileProgress.knowledge.scoreFormat'.tr(namedArgs: {'score': score.toString()}),
                     style: const TextStyle(fontSize: 12, color: Colors.white54),
                   ),
               ],
@@ -2076,7 +2104,7 @@ class _ProfilePageState extends State<ProfilePage> {
           const SizedBox(height: 16),
           if (unlocked.isNotEmpty) ...[
             Text(
-              'Unlocked',
+              'profileProgress.achievements.unlocked'.tr(),
               style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.amber[400]),
             ),
             const SizedBox(height: 8),
@@ -2138,7 +2166,7 @@ class _ProfilePageState extends State<ProfilePage> {
           if (locked.isNotEmpty) ...[
             const SizedBox(height: 16),
             Text(
-              'Locked',
+              'profileProgress.achievements.locked'.tr(),
               style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.grey[500]),
             ),
             const SizedBox(height: 8),

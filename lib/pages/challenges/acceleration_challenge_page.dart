@@ -8,6 +8,10 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:easy_localization/easy_localization.dart';
 import '../../services/image_service_cache.dart'; // ← Utilisation du cache local
 import '../../services/audio_feedback.dart'; // centralized audio router
+import '../../widgets/enhanced_answer_button.dart';
+import '../../widgets/question_progress_bar.dart';
+import '../../widgets/animated_score_display.dart';
+import '../../widgets/challenge_completion_dialog.dart';
 
 class AccelerationChallengePage extends StatefulWidget {
   @override
@@ -39,9 +43,14 @@ class _AccelerationChallengePageState extends State<AccelerationChallengePage> {
   // Answer highlighting
   bool _answered = false;
   String? _selectedAcceleration;
+  List<bool> _answerHistory = [];
 
   // simple streak tracker for streak audio
   int _streak = 0;
+
+  int _currentStreak = 0;
+  bool _showScoreChange = false;
+  bool _wasLastAnswerCorrect = false;
 
   @override
   void initState() {
@@ -160,14 +169,29 @@ class _AccelerationChallengePageState extends State<AccelerationChallengePage> {
       AudioFeedback.instance.playEvent(SoundEvent.tap);
     } catch (_) {}
 
+    final isCorrect = accel == _correctAcceleration;
     setState(() {
       _answered = true;
       _selectedAcceleration = accel;
-      if (accel == _correctAcceleration) {
+      if (isCorrect) {
         _correctAnswers++;
         _streak += 1;
+        _currentStreak++;
       } else {
         _streak = 0;
+        _currentStreak = 0;
+      }
+      _answerHistory.add(isCorrect);
+      _wasLastAnswerCorrect = isCorrect;
+      _showScoreChange = true;
+    });
+
+    // Reset the animation flag after a short delay
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (mounted) {
+        setState(() {
+          _showScoreChange = false;
+        });
       }
     });
 
@@ -209,28 +233,22 @@ class _AccelerationChallengePageState extends State<AccelerationChallengePage> {
 
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('challenges.complete'.tr()),
-        content: Text(
-          'challenges.score'.tr(namedArgs: {
-            'score': _correctAnswers.toString(),
-            'total': '20'
-          }) +
-          ' in ${_elapsedSeconds ~/ 60}m ${(_elapsedSeconds % 60).toString().padLeft(2, '0')}s',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              if (_correctAnswers >= 10) {
-                Navigator.of(context).pop(true);
-              } else {
-                Navigator.pop(context,'$_correctAnswers/20 in ${_elapsedSeconds ~/ 60}\'${(_elapsedSeconds % 60).toString().padLeft(2, '0')}\'\'',);
-              }
-            },
-            child: Text('common.ok'.tr()),
-          ),
-        ],
+      barrierDismissible: false,
+      builder: (ctx) => ChallengeCompletionDialog(
+        correctAnswers: _correctAnswers,
+        totalQuestions: 20,
+        totalSeconds: _elapsedSeconds,
+        onClose: () {
+          Navigator.of(ctx).pop();
+          if (_correctAnswers >= 10) {
+            Navigator.of(context).pop(true);
+          } else {
+            Navigator.pop(
+              context,
+              '$_correctAnswers/20 in ${_elapsedSeconds ~/ 60}\'${(_elapsedSeconds % 60).toString().padLeft(2, '0')}\'\'',
+            );
+          }
+        },
       ),
     );
   }
@@ -281,11 +299,27 @@ class _AccelerationChallengePageState extends State<AccelerationChallengePage> {
       ),
       body: _currentBrand == null
           ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
+          : Column(
+              children: [
+                QuestionProgressBar(
+                  currentQuestion: _questionCount,
+                  totalQuestions: 20,
+                  answeredCorrectly: _answerHistory,
+                ),
+                Expanded(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                  AnimatedScoreDisplay(
+                    currentScore: _correctAnswers,
+                    totalQuestions: 20,
+                    currentStreak: _currentStreak,
+                    showScoreChange: _showScoreChange,
+                    wasCorrect: _wasLastAnswerCorrect,
+                  ),
+                  const SizedBox(height: 16),
                   Text(
                     'challenges.whatAcceleration'.tr() + '\n'
                     '${_currentBrand!} ${_currentModel!}?',
@@ -346,38 +380,23 @@ class _AccelerationChallengePageState extends State<AccelerationChallengePage> {
                   ),
                   const SizedBox(height: 24),
                   for (var accel in _options)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 6.0),
-                      child: SizedBox(
-                        height: 50,
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: Material(
-                            color: _answered
-                                ? (accel == _correctAcceleration
-                                    ? Colors.green
-                                    : (accel == _selectedAcceleration
-                                        ? Colors.red
-                                        : Colors.grey[800]!))
-                                : Colors.grey[800],
-                            child: InkWell(
-                              onTap: _answered ? null : () => _onTap(accel),
-                              child: Center(
-                                child: Text(
-                                  accel,
-                                  style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.bold),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
+                    EnhancedAnswerButton(
+                      text: accel,
+                      backgroundColor: _answered
+                          ? (accel == _correctAcceleration
+                              ? Colors.green
+                              : (accel == _selectedAcceleration
+                                  ? Colors.red
+                                  : Colors.grey[800]!))
+                          : Colors.grey[800]!,
+                      onTap: () => _onTap(accel),
+                      isDisabled: _answered,
                     ),
-                ],
-              ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
     );
   }

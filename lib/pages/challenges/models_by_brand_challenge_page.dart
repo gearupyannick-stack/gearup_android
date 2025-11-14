@@ -7,6 +7,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:easy_localization/easy_localization.dart';
 import '../../services/audio_feedback.dart';
+import '../../widgets/enhanced_answer_button.dart';
+import '../../widgets/question_progress_bar.dart';
+import '../../widgets/animated_score_display.dart';
+import '../../widgets/challenge_completion_dialog.dart';
 
 import '../../services/image_service_cache.dart'; // ← Utilisation du cache local
 
@@ -212,6 +216,11 @@ class _BrandModelQuizPageState extends State<BrandModelQuizPage> {
   late Timer _quizTimer;
   late Timer _frameTimer;
   static const int _maxFrames = 6;
+  List<bool> _answerHistory = [];
+
+  int _currentStreak = 0;
+  bool _showScoreChange = false;
+  bool _wasLastAnswerCorrect = false;
 
   @override
   void initState() {
@@ -290,29 +299,18 @@ class _BrandModelQuizPageState extends State<BrandModelQuizPage> {
     _frameTimer.cancel();
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('challenges.complete'.tr()),
-        content: Text(
-          'challenges.score'.tr(namedArgs: {
-            'score': _correctAnswers.toString(),
-            'total': _maxQuestions.toString()
-          }) +
-          ' in ${_elapsedSeconds ~/ 60}m '
-          '${(_elapsedSeconds % 60).toString().padLeft(2, '0')}s',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              if (_correctAnswers >= 10) {
-                Navigator.of(context).pop(true);
-              } else {
-                Navigator.pop(context,'$_correctAnswers/20 in ${_elapsedSeconds ~/ 60}\'${(_elapsedSeconds % 60).toString().padLeft(2, '0')}\'\'',);
-              }
-            },
-            child: Text('common.ok'.tr()),
-          ),
-        ],
+      barrierDismissible: false,
+      builder: (ctx) => ChallengeCompletionDialog(
+        correctAnswers: _correctAnswers,
+        totalQuestions: _maxQuestions,
+        totalSeconds: _elapsedSeconds,
+        onClose: () {
+          Navigator.pop(ctx);
+          Navigator.pop(
+            context,
+            '$_correctAnswers/20 in ${_elapsedSeconds ~/ 60}\'${(_elapsedSeconds % 60).toString().padLeft(2, '0')}\'\'',
+          );
+        },
       ),
     );
   }
@@ -328,14 +326,34 @@ class _BrandModelQuizPageState extends State<BrandModelQuizPage> {
 
 
   void _onOptionTap(String selection) {
-    
+
     try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
 if (_answered) return;
+    final isCorrect = selection == _correctAnswer;
     setState(() {
       _answered = true;
       _selectedModel = selection;
-      if (selection == _correctAnswer) _correctAnswers++;
+      if (isCorrect) _correctAnswers++;
+      _answerHistory.add(isCorrect);
+
+      if (isCorrect) {
+        _currentStreak++;
+      } else {
+        _currentStreak = 0;
+      }
+      _wasLastAnswerCorrect = isCorrect;
+      _showScoreChange = true;
     });
+
+    // Reset the animation flag after a short delay
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (mounted) {
+        setState(() {
+          _showScoreChange = false;
+        });
+      }
+    });
+
     Future.delayed(const Duration(seconds: 1), _nextQuestion);
   }
 
@@ -359,16 +377,24 @@ if (_answered) return;
           ),
         ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            Text(
-              'challenges.score'.tr(namedArgs: {
-                'score': _correctAnswers.toString(),
-                'total': _maxQuestions.toString()
-              }),
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+      body: Column(
+        children: [
+          QuestionProgressBar(
+            currentQuestion: _questionCount,
+            totalQuestions: _maxQuestions,
+            answeredCorrectly: _answerHistory,
+          ),
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+            AnimatedScoreDisplay(
+              currentScore: _correctAnswers,
+              totalQuestions: _maxQuestions,
+              currentStreak: _currentStreak,
+              showScoreChange: _showScoreChange,
+              wasCorrect: _wasLastAnswerCorrect,
             ),
             const SizedBox(height: 16),
 
@@ -439,37 +465,17 @@ if (_answered) return;
               ),
               const SizedBox(height: 24),
               for (var m in _options)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 6.0),
-                  child: SizedBox(
-                    width: double.infinity,
-                    height: 50,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: Material(
-                        color: _answered
-                            ? (m == _correctAnswer
-                                ? Colors.green
-                                : (m == _selectedModel
-                                    ? Colors.red
-                                    : Colors.grey[800]!))
-                            : Colors.grey[800],
-                        child: InkWell(
-                          onTap: () { try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {};
-                              _onOptionTap(m); },
-                          child: Center(
-                            child: Text(
-                              m,
-                              style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
+                EnhancedAnswerButton(
+                  text: m,
+                  backgroundColor: _answered
+                      ? (m == _correctAnswer
+                          ? Colors.green
+                          : (m == _selectedModel
+                              ? Colors.red
+                              : Colors.grey[800]!))
+                      : Colors.grey[800]!,
+                  onTap: () => _onOptionTap(m),
+                  isDisabled: _answered,
                 ),
             ] else ...[
               const SizedBox(height: 16),
@@ -501,6 +507,8 @@ if (_answered) return;
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(12),
                       child: Material(
+                        elevation: 4,
+                        borderRadius: BorderRadius.circular(12),
                         color: Colors.grey[900],
                         child: AnimatedSwitcher(
                           duration: const Duration(milliseconds: 500),
@@ -576,8 +584,11 @@ if (_answered) return;
                 ),
               ),
             ],
-          ],
-        ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
