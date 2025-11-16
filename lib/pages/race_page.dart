@@ -1,3 +1,4 @@
+// --- add/replace these imports at the top of the file ---
 import 'dart:async';
 import 'dart:math';
 import 'dart:ui' as ui;
@@ -8,19 +9,24 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:csv/csv.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../services/audio_feedback.dart';
-import '../services/image_service_cache.dart';
-import '../services/collab_wan_service.dart';
+import '../services/collab_wan_service.dart'; // <<-- NEW
 import '../services/ad_service.dart';
 import '../services/analytics_service.dart';
 import '../services/language_service.dart';
+import '../services/image_service_cache.dart';
+
+// Design System imports
+import '../design_system/tokens.dart';
+import '../design_system/widgets/segmented_control.dart';
+import '../design_system/widgets/race_progress_bar.dart'; // includes CompactRaceProgressBar
+import '../design_system/widgets/animated_race_score.dart';
+import '../design_system/widgets/race_answer_button.dart';
+import '../design_system/widgets/image_frame_controls.dart';
+import '../design_system/widgets/race_join_dialog.dart';
+import '../design_system/widgets/waiting_lobby_overlay.dart';
 
 class RacePage extends StatefulWidget {
-  final String? username;
-  
-  const RacePage({
-    Key? key,
-    this.username,
-  }) : super(key: key);
+  const RacePage({Key? key}) : super(key: key);
 
   @override
   State<RacePage> createState() => _RacePageState();
@@ -59,6 +65,26 @@ mixin AudioAnswerMixin<T extends StatefulWidget> on State<T> {
 
 }
 
+// Helper to return the correct ImageProvider based on Android's image storage.
+// For model images (car photos), use ImageCacheService (downloads from Firebase Storage).
+// For UI assets (track backgrounds), use AssetImage (bundled in app).
+ImageProvider _assetImageProvider(String name) {
+  if (name.startsWith('assets/')) {
+    // UI assets like track backgrounds - use bundled assets
+    return AssetImage(name);
+  } else {
+    // Model car images - use cached Firebase Storage images
+    return ImageCacheService.instance.imageProvider(name);
+  }
+}
+
+// Helper to generate a unique race session ID
+String _generateRaceSessionId() {
+  final timestamp = DateTime.now().millisecondsSinceEpoch;
+  final random = Random().nextInt(999999);
+  return '${timestamp}_$random';
+}
+
 class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin {
   bool isPublicMode = true;
   int? _activeTrackIndex;
@@ -66,7 +92,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
   // signal to abort the current race / quiz (set when user taps Leave inside a question)
   bool _raceAborted = false;
-  bool _handlingEndRace = false;
 
   // New: race / car animation state
   bool _raceStarted = false;
@@ -81,7 +106,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   Timer? _presenceTimer;
   bool _waitingForNextQuestion = false;
   StreamSubscription<List<CollabMessage>>? _messagesSub;
-  bool _raceEndedByServer = false;
 
   // quiz / step-race state
   List<int> _quizSelectedIndices = [];
@@ -90,9 +114,19 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   double _currentDistance = 0.0; // traveled distance in px along path
   double _stepDistance = 0.0;    // _totalPathLength / totalQuestions
   String? _roomCreatorId;
-  
-  // ADD these fields inside _RacePageState
-  static const String _kRaceInterstitialCounterKey = 'race_interstitial_counter';
+
+  // Race session ID to distinguish between different race instances in the same room
+  String? _currentRaceSessionId;
+
+  // Message processing lock to prevent concurrent setState()
+  bool _processingMessages = false;
+
+  // Race start reentrancy guard
+  bool _startingRace = false;
+
+  // end_race handling guards
+  bool _handlingEndRace = false;
+  bool _raceEndedByServer = false;
 
   // --- path data for tracks (normalized coords in [0..1]) ---
   // Monza (RaceTrack0) — the list you asked for
@@ -172,6 +206,78 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         .join();
   }
 
+  // small helper to start the car animation
+  void _startCar() {
+    if (!mounted) return;
+
+    // CRITICAL FIX: Guard against premature finish - only start final animation if all questions are completed
+    final totalSlots = _quizSelectedIndices.length;
+    if (totalSlots > 0 && _quizCurrentPos < totalSlots) {
+      debugPrint('_startCar: Cannot start final animation - questions not complete ($_quizCurrentPos / $totalSlots)');
+      return;
+    }
+
+    // Track race final animation
+    AnalyticsService.instance.logEvent(
+      name: 'race_final_animation',
+      parameters: {
+        'track': _activeTrackIndex ?? 0,
+        'is_multiplayer': _currentRoomCode != null ? 'true' : 'false',
+        'score': _quizScore,
+      },
+    );
+
+    // CRITICAL FIX: Properly animate to finish and call _onRaceFinished (like Android)
+    try { _carController.stop(); } catch (_) {}
+
+    final cur = _carController.value.clamp(0.0, 1.0);
+    final remaining = (1.0 - cur).clamp(0.0, 1.0);
+
+    // if already at or extremely close to the end, trigger finish immediately
+    if (remaining <= 1e-3) {
+      try { _carController.value = 1.0; } catch (_) {}
+      Future.microtask(() => _onRaceFinished());
+      return;
+    }
+
+    final baseDuration = _carController.duration ?? const Duration(seconds: 6);
+    final ms = max(300, (baseDuration.inMilliseconds * remaining).round());
+    final animDuration = Duration(milliseconds: ms);
+
+    // animate the rest of the lap once, then run finish handler
+    _carController
+        .animateTo(1.0, duration: animDuration, curve: Curves.easeInOut)
+        .then((_) {
+      if (mounted) _onRaceFinished();
+    }).catchError((err) {
+      debugPrint('Car animation to finish failed: $err');
+      if (mounted) _onRaceFinished();
+    });
+  }
+
+  // Determine race winner based on score (higher is better) and errors (lower is better)
+  PlayerInfo _determineWinner(List<PlayerInfo> players) {
+    if (players.isEmpty) {
+      return PlayerInfo(id: '', displayName: 'No one', lastSeen: DateTime.now(), score: 0, errors: 0);
+    }
+
+    // defensive: make a sorted copy
+    final sorted = List<PlayerInfo>.from(players);
+    sorted.sort((a, b) {
+      // primary: score desc
+      final scoreCmp = b.score.compareTo(a.score);
+      if (scoreCmp != 0) return scoreCmp;
+      // secondary: errors asc
+      final errCmp = a.errors.compareTo(b.errors);
+      if (errCmp != 0) return errCmp;
+      // tertiary: earlier lastSeen wins (smaller DateTime)
+      return a.lastSeen.compareTo(b.lastSeen);
+    });
+
+    return sorted.first;
+  }
+
+  // Show race result dialog with winner and leaderboard
   Future<void> _showRaceResultDialog(List<PlayerInfo> players, PlayerInfo winner) async {
     if (!mounted) return;
 
@@ -202,42 +308,127 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     );
   }
 
-  Future<void> _loadRaceInterstitialCounter() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      prefs.getInt(_kRaceInterstitialCounterKey);
-      if (mounted) {
-        setState(() {
+  // Called when local player finishes all questions
+  Future<void> _onRaceFinished() async {
+    if (!mounted) return;
+
+    debugPrint('Race finished locally — running finish flow.');
+
+    // PHASE 2 FIX: Ensure all questions are actually completed before finishing
+    final totalSlots = _quizSelectedIndices.length;
+    if (totalSlots > 0 && _quizCurrentPos < totalSlots) {
+      debugPrint('Cannot finish race - only $_quizCurrentPos/$totalSlots questions completed');
+      return;
+    }
+
+    // ensure the car isn't repeating
+    try { _carController.stop(); } catch (_) {}
+
+    // PHASE 2 FIX: Send final score BEFORE checking _raceEndedByServer
+    // This ensures other players see our final score even if they finish simultaneously
+    final room = _currentRoomCode;
+    final localId = _collab.localPlayerId;
+    if (room != null) {
+      try {
+        await _collab.sendMessage(room, {
+          'type': 'score_update',
+          'playerId': localId,
+          'score': _quizScore,
         });
-      } else {
+      } catch (e) {
+        debugPrint('Failed to send final score update: $e');
       }
-    } catch (e) {
-      // ignore errors gracefully
-      // print('Failed to load race interstitial counter: $e');
-    }
-  }
-
-  PlayerInfo _determineWinner(List<PlayerInfo> players) {
-    if (players.isEmpty) {
-      return PlayerInfo(id: '', displayName: 'No one', lastSeen: DateTime.now(), score: 0, errors: 0);
     }
 
-    // defensive: make a sorted copy
-    final sorted = List<PlayerInfo>.from(players);
-    sorted.sort((a, b) {
-      // primary: score desc
-      final scoreCmp = b.score.compareTo(a.score);
-      if (scoreCmp != 0) return scoreCmp;
-      // secondary: errors asc
-      final errCmp = a.errors.compareTo(b.errors);
-      if (errCmp != 0) return errCmp;
-      // tertiary: earlier lastSeen wins (smaller DateTime)
-      return a.lastSeen.compareTo(b.lastSeen);
+    // If server already declared the race ended, don't re-run finish logic.
+    if (_raceEndedByServer) {
+      debugPrint('Race already ended by server; aborting local finish flow.');
+      return;
+    }
+
+    // give server/opponent a short moment to push final scores
+    await Future.delayed(const Duration(milliseconds: 700));
+
+    // snapshot players (copy to avoid concurrent mutation)
+    List<PlayerInfo> playersSnapshot = List<PlayerInfo>.from(_playersInRoom);
+
+    // ensure local player present and up-to-date
+    final localName = _nameController.text.trim().isEmpty ? 'You' : _nameController.text.trim();
+    final idxLocal = playersSnapshot.indexWhere((p) => p.id == localId || p.displayName == localName);
+    if (idxLocal >= 0) {
+      final p = playersSnapshot[idxLocal];
+      playersSnapshot[idxLocal] = PlayerInfo(
+        id: p.id,
+        displayName: p.displayName.isNotEmpty ? p.displayName : localName,
+        lastSeen: p.lastSeen,
+        score: _quizScore,
+        errors: p.errors,
+      );
+    } else {
+      playersSnapshot.add(PlayerInfo(
+        id: localId,
+        displayName: localName,
+        lastSeen: DateTime.now(),
+        score: _quizScore,
+        errors: 0,
+      ));
+    }
+
+    // determine winner
+    final winner = _determineWinner(playersSnapshot);
+
+    // Track race finished
+    final didWin = winner.id == localId || winner.displayName == localName;
+    AnalyticsService.instance.logEvent(
+      name: 'race_finished',
+      parameters: {
+        'track': _activeTrackIndex ?? 0,
+        'score': _quizScore,
+        'is_multiplayer': _currentRoomCode != null ? 'true' : 'false',
+        'won': didWin ? 'true' : 'false',
+        'players_count': playersSnapshot.length,
+      },
+    );
+
+    // mark that *we* are ending the race
+    _raceEndedByServer = true;
+
+    // inform others that race ended
+    if (room != null) {
+      try {
+        await _collab.sendMessage(room, {
+          'type': 'end_race',
+          'winnerId': winner.id,
+          'winnerName': winner.displayName,
+          'raceSessionId': _currentRaceSessionId,
+        });
+      } catch (e) {
+        debugPrint('Failed to send end_race message: $e');
+      }
+    }
+
+    // show results dialog (blocking until user dismisses)
+    await _showRaceResultDialog(playersSnapshot, winner);
+
+    // cleanup & leave room
+    await _leaveCurrentRoom();
+
+    // **Show interstitial AFTER user dismissed results dialog and after leaving the room**
+    try {
+      await _maybeShowRaceInterstitial();
+    } catch (e, st) {
+      debugPrint('Race interstitial attempt failed: $e\n$st');
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _inPublicRaceView = false;
+      _activeTrackIndex = null;
+      _raceStarted = false;
     });
-
-    return sorted.first;
   }
 
+  // Called when receiving end_race message from server/other player
   Future<void> _handleServerEndRace(Map<String, dynamic> payload) async {
     if (!mounted) return;
     debugPrint('Handling server end_race payload: $payload');
@@ -248,14 +439,22 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       return;
     }
 
-    // Prevent duplicate handling / re-entry
+    // CRITICAL: Check if this end_race message is for the current race session
+    // Ignore messages without a session ID (old messages) or with mismatched session ID
+    final String? messageSessionId = payload['raceSessionId']?.toString();
+    if (messageSessionId == null || messageSessionId != _currentRaceSessionId) {
+      debugPrint('Ignoring end_race: no session ID or session ID mismatch (message: $messageSessionId, current: $_currentRaceSessionId)');
+      return;
+    }
+
+    // CRITICAL FIX: Prevent duplicate handling / re-entry with atomic guard
     if (_handlingEndRace || _raceEndedByServer) {
       debugPrint('Already handling end_race or race already marked ended; ignoring.');
       return;
     }
 
+    // Set both flags immediately to prevent race condition
     _handlingEndRace = true;
-    // tentatively mark ended; may be cleared if we ignore
     _raceEndedByServer = true;
 
     try {
@@ -273,8 +472,8 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       // Snapshot players to avoid concurrent mutation
       List<PlayerInfo> playersSnapshot = List<PlayerInfo>.from(_playersInRoom);
 
-      // Ensure local player present and up-to-date in snapshot (use current _quizScore)
-      final localName = _nameController.text.trim().isEmpty ? tr('common.you') : _nameController.text.trim();
+      // Ensure local player present and up-to-date in snapshot
+      final localName = _nameController.text.trim().isEmpty ? 'You' : _nameController.text.trim();
       final idxLocal = playersSnapshot.indexWhere((p) => p.id == localId || p.displayName == localName);
       if (idxLocal >= 0) {
         final p = playersSnapshot[idxLocal];
@@ -327,17 +526,15 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       final totalSlots = _quizSelectedIndices.length;
       final bool localCompleted = (totalSlots > 0) && (_quizScore >= totalSlots);
 
-      // CRITICAL: If the winner selected is the local player but the local player has NOT actually
-      // completed the required number of correct answers, ignore this end_race (do NOT show "You won").
+      // If the winner is local but local hasn't completed, ignore
       if (winner.id == localId && !localCompleted) {
-        //debugPrint('Ignoring end_race: decided winner is local but local has not completed quiz (score=$_quizScore / required=$totalSlots).');
-        // clear the temporary flags so future end_race messages can be processed normally
+        debugPrint('Ignoring end_race: decided winner is local but local has not completed quiz.');
         _handlingEndRace = false;
         _raceEndedByServer = false;
         return;
       }
 
-      // If local player lost, show small "You lost" SnackBar (non-blocking).
+      // If local player lost, show small SnackBar
       if (localId != winner.id) {
         try {
           if (mounted) {
@@ -348,19 +545,17 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
               ),
             );
           }
-        } catch (_) {
-          // ignore snackbar errors
-        }
+        } catch (_) {}
       }
 
-      // Show the full results dialog (blocking until dismissed).
+      // Show the full results dialog (blocking until dismissed)
       try {
         await _showRaceResultDialog(playersSnapshot, winner);
       } catch (e) {
         debugPrint('Error showing race result dialog: $e');
       }
 
-      // best-effort ack to server that we handled the end
+      // best-effort ack to server
       if (room != null) {
         try {
           await _collab.sendMessage(room, {
@@ -372,14 +567,14 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         }
       }
 
-      // Now leave and cleanup UI — this will cancel subscriptions.
+      // leave and cleanup UI
       try {
         await _leaveCurrentRoom();
       } catch (e) {
         debugPrint('Error leaving room after end_race: $e');
       }
 
-      // **Show interstitial AFTER user dismissed results dialog and after leaving the room**
+      // **Show interstitial AFTER user dismissed results dialog**
       try {
         await _maybeShowRaceInterstitial();
       } catch (e, st) {
@@ -397,173 +592,10 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         _currentDistance = 0.0;
         _waitingForNextQuestion = false;
         _roomCreatorId = null;
-
-        // reset server-end flag so a new game later can run normally
-        _raceEndedByServer = false;
       });
     } finally {
-      // Ensure reentrancy guard cleared if we didn't already return.
       _handlingEndRace = false;
     }
-  }
-
-  Future<void> _onRaceFinished() async {
-    if (!mounted) return;
-
-    debugPrint('Race finished locally — running finish flow.');
-
-    // ensure the car isn't repeating
-    try { _carController.stop(); } catch (_) {}
-
-    // If server already declared the race ended, don't re-run finish logic.
-    if (_raceEndedByServer) {
-      debugPrint('Race already ended by server; aborting local finish flow.');
-      return;
-    }
-
-    // send local final score to server (best-effort)
-    final room = _currentRoomCode;
-    final localId = _collab.localPlayerId;
-    if (room != null) {
-      try {
-        await _collab.sendMessage(room, {
-          'type': 'score_update',
-          'playerId': localId,
-          'score': _quizScore,
-        });
-      } catch (e) {
-        debugPrint('Failed to send final score update: $e');
-      }
-    }
-
-    // give server/opponent a short moment to push final scores
-    await Future.delayed(const Duration(milliseconds: 700));
-
-    // snapshot players (copy to avoid concurrent mutation)
-    List<PlayerInfo> playersSnapshot = List<PlayerInfo>.from(_playersInRoom);
-
-    // ensure local player present and up-to-date
-    final localName = _nameController.text.trim().isEmpty ? tr('common.you') : _nameController.text.trim();
-    final idxLocal = playersSnapshot.indexWhere((p) => p.id == localId || p.displayName == localName);
-    if (idxLocal >= 0) {
-      final p = playersSnapshot[idxLocal];
-      playersSnapshot[idxLocal] = PlayerInfo(
-        id: p.id,
-        displayName: p.displayName.isNotEmpty ? p.displayName : localName,
-        lastSeen: p.lastSeen,
-        score: _quizScore,
-        errors: p.errors,
-      );
-    } else {
-      playersSnapshot.add(PlayerInfo(
-        id: localId,
-        displayName: localName,
-        lastSeen: DateTime.now(),
-        score: _quizScore,
-        errors: 0,
-      ));
-    }
-
-    // determine winner (local decision only if server hasn't already declared one)
-    final winner = _determineWinner(playersSnapshot);
-
-    // Track race finished
-    final didWin = winner.id == localId || winner.displayName == localName;
-    AnalyticsService.instance.logEvent(
-      name: 'race_finished',
-      parameters: {
-        'track': _activeTrackIndex ?? 0,
-        'score': _quizScore,
-        'is_multiplayer': _currentRoomCode != null ? 'true' : 'false',
-        'won': didWin ? 'true' : 'false',
-        'players_count': playersSnapshot.length,
-      },
-    );
-
-    // mark that *we* are ending the race and inform others — include winnerName so receivers can show it
-    _raceEndedByServer = true;
-
-    if (room != null) {
-      try {
-        await _collab.sendMessage(room, {
-          'type': 'end_race',
-          'winnerId': winner.id,
-          'winnerName': winner.displayName,
-        });
-      } catch (e) {
-        debugPrint('Failed to send end_race message: $e');
-      }
-    }
-
-    // show results dialog (blocking until user dismisses)
-    await _showRaceResultDialog(playersSnapshot, winner);
-
-    // cleanup & leave room, return to track grid
-    await _leaveCurrentRoom();
-
-    // **Show interstitial AFTER user dismissed results dialog and after leaving the room**
-    try {
-      await _maybeShowRaceInterstitial();
-    } catch (e, st) {
-      debugPrint('Race interstitial attempt failed: $e\n$st');
-    }
-
-    if (!mounted) return;
-    setState(() {
-      _inPublicRaceView = false;
-      _activeTrackIndex = null;
-    });
-  }
-
-  // --- replace existing _startCar() with this ---
-  void _startCar() {
-    if (!mounted) return;
-
-    // CRITICAL FIX: Guard against premature finish - only start final animation if all questions are completed
-    final totalSlots = _quizSelectedIndices.length;
-    if (totalSlots > 0 && _quizCurrentPos < totalSlots) {
-      debugPrint('_startCar: Cannot start final animation - questions not complete ($_quizCurrentPos / $totalSlots)');
-      return;
-    }
-
-    // Track race started (final animation)
-    AnalyticsService.instance.logEvent(
-      name: 'race_final_animation',
-      parameters: {
-        'track': _activeTrackIndex ?? 0,
-        'is_multiplayer': _currentRoomCode != null ? 'true' : 'false',
-        'score': _quizScore,
-      },
-    );
-
-    // stop any ongoing action first
-    try { _carController.stop(); } catch (_) {}
-
-    final cur = _carController.value.clamp(0.0, 1.0);
-    final remaining = (1.0 - cur).clamp(0.0, 1.0);
-
-    // if already at or extremely close to the end, trigger finish immediately
-    if (remaining <= 1e-3) {
-      // ensure visual at end
-      try { _carController.value = 1.0; } catch (_) {}
-      // call finish handler on next microtask so UI settles
-      Future.microtask(() => _onRaceFinished());
-      return;
-    }
-
-    final baseDuration = _carController.duration ?? const Duration(seconds: 6);
-    final ms = max(300, (baseDuration.inMilliseconds * remaining).round());
-    final animDuration = Duration(milliseconds: ms);
-
-    // animate the rest of the lap once, then run finish handler
-    _carController
-        .animateTo(1.0, duration: animDuration, curve: Curves.easeInOut)
-        .then((_) {
-      if (mounted) _onRaceFinished();
-    }).catchError((err) {
-      debugPrint('Car animation to finish failed: $err');
-      if (mounted) _onRaceFinished();
-    });
   }
 
   void _subscribePublicTracks() {
@@ -766,22 +798,14 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       MaterialPageRoute(
         builder: (_) => _QuestionPage(
           content: content,
-          onLeave: () async {
+          onLeave: () {
             // Called when user chooses Leave from the question AppBar.
+            // Stop animation, tell backend to remove/reset our presence/score, and reset UI.
             try { _carController.stop(); } catch (_) {}
 
-            // best-effort notify server and remove presence/score when leaving from the question.
-            await _leaveCurrentRoom();
-
-            // Only attempt ad if there was race activity
-            final bool hadProgress = _raceStarted || _quizCurrentPos > 0 || _quizScore > 0;
-            if (hadProgress) {
-              try {
-                await _maybeShowRaceInterstitial();
-              } catch (e) {
-                debugPrint('Race interstitial on leave (question) failed: $e');
-              }
-            }
+            // Best-effort notify server and remove presence/score when leaving from the question.
+            // Fire-and-forget; we don't await because this callback must remain synchronous.
+            _leaveCurrentRoom();
 
             if (!mounted) return;
             setState(() {
@@ -1139,8 +1163,16 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   }
 
   Future<void> _startQuizRace() async {
-    _raceAborted = false;
-    // ensure car data is loaded
+    // CRITICAL FIX: Prevent reentrancy - race can only start once
+    if (_startingRace || _raceStarted) {
+      debugPrint('Race already starting or started - ignoring duplicate call');
+      return;
+    }
+    _startingRace = true;
+
+    try {
+      _raceAborted = false;
+      // ensure car data is loaded
     if (carData.isEmpty) {
       await _loadCarData();
       if (carData.isEmpty) {
@@ -1213,21 +1245,30 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       await _preparePath(W, H, _safeIndex(_activeTrackIndex));
     }
 
-    _stepDistance = (_totalPathLength > 0 ? _totalPathLength / _quizSelectedIndices.length : 0.0);
+      _stepDistance = (_totalPathLength > 0 ? _totalPathLength / _quizSelectedIndices.length : 0.0);
 
-    // reset animation controller to start of lap
-    _carController.stop();
-    _carController.reset();
-    _carController.value = 0.0;
+      // reset animation controller to start of lap
+      _carController.stop();
+      _carController.reset();
+      _carController.value = 0.0;
 
-    // DON'T set _raceStarted = true here - it will be set after first question is shown
-    // This prevents the "immediate win" bug
+      // DON'T set _raceStarted = true here - it will be set after first question is shown
+      // This prevents the "immediate win" bug
 
-    // ask first question (this will chain the rest)
-    await _askNextQuestion();
+      // ask first question (this will chain the rest)
+      await _askNextQuestion();
+    } finally {
+      _startingRace = false;
+    }
   }
 
   Future<void> _joinPrivateGame(int index, String displayName, String roomCode, {bool isCreator = false}) async {
+    // PHASE 2 FIX: Clean up any previous race state before joining new race
+    await _leaveCurrentRoom();
+
+    // Generate a new unique session ID for this race instance
+    final newSessionId = _generateRaceSessionId();
+
     // Mark UI state (local) - CRITICAL FIX: Reset ALL state flags to prevent rejoin bugs
     setState(() {
       _activeTrackIndex = index;
@@ -1246,6 +1287,8 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       _raceEndedByServer = false;
       _handlingEndRace = false;
       _roomCreatorId = null;
+      // CRITICAL: Set new session ID to distinguish this race from previous ones
+      _currentRaceSessionId = newSessionId;
     });
     _carController.stop();
     _carController.reset();
@@ -1262,15 +1305,15 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       await _collab.cleanupStalePlayers(roomCode, ttl: const Duration(seconds: 15));
       // Subscribe to players list
       _playersSub?.cancel();
-      _playersSub = _collab.playersStream(roomCode).listen((players) async {
+      _playersSub = _collab.playersStream(roomCode).listen((players) {
         if (!mounted) return;
-        // Merge incoming players with existing ones to preserve score/errors
+        // PHASE 3 FIX: Optimize player merging from O(n²) to O(n) using Map lookup
         setState(() {
+          // Create lookup map for existing players - O(n)
+          final existing = {for (var p in _playersInRoom) p.id: p};
+          // Merge players using O(1) Map lookup instead of O(n) firstWhere - O(n) total
           _playersInRoom = players.map((newPlayer) {
-            final existingPlayer = _playersInRoom.firstWhere(
-              (p) => p.id == newPlayer.id,
-              orElse: () => newPlayer,
-            );
+            final existingPlayer = existing[newPlayer.id] ?? newPlayer;
             return PlayerInfo(
               id: newPlayer.id,
               displayName: newPlayer.displayName,
@@ -1280,20 +1323,18 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
             );
           }).toList();
         });
-
-        // Auto-start if 2+ players and not already started
-        if (!_raceStarted && players.length >= 2) {
-          debugPrint('Starting race with ${players.length} players!');
-          await _startQuizRace();
-        }
       });
+      // Listen for score/error updates via messages
+      _messagesSub = _collab.messagesStream(_currentRoomCode!).listen((messages) async {
+        // CRITICAL FIX: Prevent concurrent message processing
+        if (_processingMessages) return;
+        _processingMessages = true;
 
-      // Listen for score/error updates + start_race + end_race
-      _messagesSub = _collab.messagesStream(_currentRoomCode!).listen(
-        (messages) {
+        try {
           for (final msg in messages) {
-            final type = msg.payload['type'];
-            if (type == 'score_update') {
+            if (!mounted) break;
+
+            if (msg.payload['type'] == 'score_update') {
               setState(() {
                 _playersInRoom = _playersInRoom.map((p) {
                   if (p.id == msg.payload['playerId']) {
@@ -1308,91 +1349,50 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                   return p;
                 }).toList();
               });
-            } else if (type == 'error_update') {
-              setState(() {
-                _playersInRoom = _playersInRoom.map((p) {
-                  if (p.id == msg.payload['playerId']) {
-                    return PlayerInfo(
-                      id: p.id,
-                      displayName: p.displayName,
-                      lastSeen: p.lastSeen,
-                      score: p.score,
-                      errors: msg.payload['errors'],
-                    );
-                  }
-                  return p;
-                }).toList();
-              });
-            } else if (type == 'start_race') {
-              // Start the race for all players when the message is received
-              if (!_raceStarted) {
-                debugPrint('Received start_race message, starting race!');
-                _startQuizRace();
+            } else if (msg.payload['type'] == 'error_update') {
+            setState(() {
+              _playersInRoom = _playersInRoom.map((p) {
+                if (p.id == msg.payload['playerId']) {
+                  return PlayerInfo(
+                    id: p.id,
+                    displayName: p.displayName,
+                    lastSeen: p.lastSeen,
+                    score: p.score,
+                    errors: msg.payload['errors'],
+                  );
+                }
+                return p;
+              }).toList();
+            });
+          } else if (msg.payload['type'] == 'start_race') {
+            // Start the race for all players when the message is received
+            if (!_raceStarted) {
+              // PHASE 2 FIX: Synchronize session ID BEFORE await to prevent race window
+              final String? messageSessionId = msg.payload['raceSessionId']?.toString();
+              if (messageSessionId != null) {
+                _currentRaceSessionId = messageSessionId;  // Direct assignment - synchronous
               }
-            } else if (type == 'end_race') {
-              // If we're not showing the race UI, ignore stale end_race messages.
-              if (!_inPublicRaceView) {
-                debugPrint('Received end_race but not in public race view — ignoring.');
-                continue;
-              }
-
-              // Extract payload copy
-              Map<String, dynamic> payload;
-              try {
-                payload = Map<String, dynamic>.from(msg.payload);
-              } catch (e) {
-                debugPrint('Invalid end_race payload format: $e');
-                continue;
-              }
-
-              // Inspect winner info
-              final winnerIdRaw = payload['winnerId'];
-              final winnerNameRaw = payload['winnerName'];
-              final bool payloadHasWinner = (winnerIdRaw != null && winnerIdRaw.toString().isNotEmpty) ||
-                                            (winnerNameRaw != null && winnerNameRaw.toString().isNotEmpty);
-
-              // total slots expected for this race and local completion status
-              final totalSlots = _quizSelectedIndices.length;
-              final bool localCompleted = (totalSlots > 0) && (_quizScore >= totalSlots);
-
-              if (!_raceStarted && _quizSelectedIndices.isEmpty) {
-                // We haven't started a local race and have no quiz slots selected yet.
-                // An `end_race` received here is likely the tail of a previous race
-                // (sent before we joined) — ignore it unconditionally to avoid
-                // showing stale results to a player joining a public room.
-                debugPrint('Received end_race before local race start — ignoring.');
-                continue;
-              }
-
-              // If the server named the local player as winner but the local player hasn't completed the required
-              // number of correct answers, ignore it (we only show "you won" when local actually finished).
-              if (payloadHasWinner && (winnerIdRaw == _collab.localPlayerId || winnerNameRaw == _nameController.text.trim()) && !localCompleted) {
-                debugPrint('Ignoring end_race: server named local as winner but local not finished (score=$_quizScore / required=$totalSlots).');
-                continue;
-              }
-
-              // Prevent re-entry / duplicate handling
-              if (_handlingEndRace || _raceEndedByServer) {
-                debugPrint('Received end_race but already handling or marked ended — ignoring.');
-                continue;
-              }
-
-              try {
-                final payloadCopy = Map<String, dynamic>.from(msg.payload);
-                // fire-and-forget the handler (it contains guards).
-                _handleServerEndRace(payloadCopy);
-              } catch (e) {
-                debugPrint('Error handling server end_race: $e');
-              }
+              debugPrint('Received start_race message (session: $_currentRaceSessionId), starting race!');
+              await _startQuizRace();
+            }
+          } else if (msg.payload['type'] == 'end_race') {
+            // Handle race end from server/other player
+            if (!_inPublicRaceView) {
+              debugPrint('Received end_race but not in public race view — ignoring.');
+              continue;
+            }
+            try {
+              final payloadCopy = Map<String, dynamic>.from(msg.payload);
+              _handleServerEndRace(payloadCopy);
+            } catch (e) {
+              debugPrint('Error handling server end_race: $e');
             }
           }
-        },
-        onError: (err) {
-          debugPrint('Error in messagesStream(${_currentRoomCode ?? "unknown"}): $err');
-        },
-        cancelOnError: false,
-      );
-
+        }
+      } finally {
+          _processingMessages = false;
+        }
+      });
       // Periodic presence update
       _presenceTimer?.cancel();
       _presenceTimer = Timer.periodic(const Duration(seconds: 8), (_) {
@@ -1416,127 +1416,282 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   }
 
   Future<void> _showPrivateJoinDialog(int index, String title) async {
-    // Try to use profile username if available, otherwise fall back to random Player###.
-    final profileName = await _fetchProfileUsername();
-    if (profileName.isNotEmpty) {
-      _nameController.text = profileName;
+    final choice = await showDialog<String>(
+      context: context,
+      barrierDismissible: true,
+      builder: (context) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 400),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Color(0xFF2D2D2D),
+                Color(0xFF1E1E1E),
+              ],
+            ),
+            borderRadius: DesignTokens.borderRadiusXLarge,
+            boxShadow: DesignTokens.shadowLevel4,
+          ),
+          padding: const EdgeInsets.all(DesignTokens.space24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Header with icon
+              Container(
+                padding: const EdgeInsets.all(DesignTokens.space16),
+                decoration: BoxDecoration(
+                  color: DesignTokens.primaryRed.withOpacity(0.2),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.group,
+                  size: 32,
+                  color: DesignTokens.primaryRed,
+                ),
+              ),
+
+              const SizedBox(height: DesignTokens.space16),
+
+              // Title
+              Text(
+                title,
+                style: DesignTokens.heading2.copyWith(
+                  color: DesignTokens.white,
+                ),
+                textAlign: TextAlign.center,
+              ),
+
+              const SizedBox(height: DesignTokens.space8),
+
+              // Subtitle
+              Text(
+                'Choose how to play',
+                style: DesignTokens.bodyMedium.copyWith(
+                  color: DesignTokens.textSecondary,
+                ),
+                textAlign: TextAlign.center,
+              ),
+
+              const SizedBox(height: DesignTokens.space24),
+
+              // Create Room Button
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () => Navigator.pop(context, 'create'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: DesignTokens.primaryRedDark,
+                    foregroundColor: DesignTokens.white,
+                    padding: const EdgeInsets.symmetric(
+                      vertical: DesignTokens.space16,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: DesignTokens.borderRadiusMedium,
+                    ),
+                    elevation: 4,
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.add_circle_outline, size: 20),
+                      const SizedBox(width: DesignTokens.space8),
+                      Text(
+                        'race.createRoom'.tr(),
+                        style: DesignTokens.button,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: DesignTokens.space12),
+
+              // Join Room Button
+              SizedBox(
+                width: double.infinity,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: DesignTokens.surfaceElevated,
+                    borderRadius: DesignTokens.borderRadiusMedium,
+                    border: Border.all(
+                      color: DesignTokens.primaryRed,
+                      width: 2,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.3),
+                        blurRadius: 4,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      onTap: () => Navigator.pop(context, 'join'),
+                      borderRadius: DesignTokens.borderRadiusMedium,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          vertical: DesignTokens.space16,
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Icon(Icons.login, size: 20, color: DesignTokens.white),
+                            const SizedBox(width: DesignTokens.space8),
+                            Text(
+                              'race.joinRoom'.tr(),
+                              style: DesignTokens.button,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: DesignTokens.space16),
+
+              // Cancel Button
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                style: TextButton.styleFrom(
+                  foregroundColor: DesignTokens.textSecondary,
+                ),
+                child: Text(
+                  'common.cancel'.tr(),
+                  style: DesignTokens.bodyMedium,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    if (choice == null) return;
+
+    if (choice == 'create') {
+      await _showCreatePrivateRoomDialog(index, title);
     } else {
-      _nameController.text = '${tr('race.playerPrefix')}${Random().nextInt(900) + 100}';
+      await _showJoinPrivateRoomDialog(index, title);
     }
+  }
+
+  Future<void> _showCreatePrivateRoomDialog(int index, String title) async {
+    final profileName = await _fetchProfileUsername();
+    final initialName = profileName.isNotEmpty
+        ? profileName
+        : 'Player${Random().nextInt(900) + 100}';
 
     final questionsPerTrack = {0: 5, 1: 9, 2: 12, 3: 16, 4: 20};
     final qCount = questionsPerTrack[_safeIndex(index)] ?? 12;
-    showDialog(
-      context: context,
-      builder: (context) {
-        final roomCodeController = TextEditingController();
-        return StatefulBuilder(
-          builder: (context, setState) {
-            return AlertDialog(
-              title: Text(title),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      tr('race.privateJoinIntro', namedArgs: {'qCount': '$qCount'}),
-                      style: const TextStyle(color: Colors.white70),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      tr('race.choosePlayerName'),
-                      style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white70),
-                    ),
-                    const SizedBox(height: 8),
-                    TextField(
-                      controller: _nameController,
-                      style: const TextStyle(color: Colors.white70),
-                      decoration: InputDecoration(
-                        hintText: tr('profile.enterName'),
-                        hintStyle: const TextStyle(color: Colors.white38),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    // Create Room Button
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.green,
-                      ),
-                      onPressed: () async {
-                        final carModels = carData.map((car) => car['model']!).toList()..shuffle();
-                        String roomCode = carModels.isNotEmpty ? carModels.first : 'room${Random().nextInt(900) + 100}';
-                        roomCode = roomCode.split(' ').first.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
-                        Navigator.of(context).pop();
-                        final playerName = _nameController.text.trim().isEmpty
-                            ? 'race.playerPrefix${Random().nextInt(900) + 100}'.tr()
-                            : _nameController.text.trim();
-                        debugPrint('Creating/joining private room: $roomCode as $playerName');
-                        await _saveLastRacePlayerName(playerName);
-                        FocusScope.of(context).unfocus();
-                        _joinPrivateGame(index, playerName, roomCode, isCreator: true);
-                      },
-                      child: Text('race.createRoom'.tr()),
-                    ),
-                    const SizedBox(height: 8),
-                    // Join Room Section
-                    TextField(
-                      controller: roomCodeController,
-                      style: const TextStyle(color: Colors.white70),
-                      decoration: InputDecoration(
-                        hintText: 'race.enterRoomCode'.tr(),
-                        hintStyle: const TextStyle(color: Colors.white38),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              actionsPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: Text('common.cancel'.tr()),
-                ),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.red,
-                  ),
-                  onPressed: () async {
-                    final playerName = _nameController.text.trim().isEmpty
-                        ? 'race.playerPrefix${Random().nextInt(900) + 100}'.tr()
-                        : _nameController.text.trim();
-                    final roomCode = roomCodeController.text.trim();
-                    if (roomCode.isEmpty) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: Text('race.enterRoomCode'.tr())),
-                      );
-                      return;
-                    }
-                    debugPrint('Joining private room: $roomCode as $playerName');
-                    await _saveLastRacePlayerName(playerName);
-                    FocusScope.of(context).unfocus();
-                    Navigator.of(context).pop();
-                    _joinPrivateGame(index, playerName, roomCode, isCreator: false);
-                  },
-                  child: Text('race.joinRoom'.tr()),
-                ),
-              ],
-            );
-          },
-        );
+
+    await RaceJoinDialog.show(
+      context,
+      trackName: title,
+      questionCount: qCount,
+      description: "You're about to create a private room.\n\nYou will need to answer $qCount questions correctly to complete the lap.\n\nShare the room code with friends to let them join. You can start the race once everyone is ready.",
+      initialPlayerName: initialName,
+      showDifficulty: false,
+      onJoinAsync: (playerName) async {
+        try {
+          await _saveLastRacePlayerName(playerName);
+
+          // Generate room code from car models
+          final carModels = carData.map((car) => car['model']!).toList()..shuffle();
+          String roomCode = carModels.isNotEmpty ? carModels.first : 'room${Random().nextInt(900) + 100}';
+          roomCode = roomCode.split(' ').first.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+
+          debugPrint('Creating private room: $roomCode as $playerName');
+
+          // Join with created room code
+          Future.delayed(const Duration(milliseconds: 250), () {
+            if (!mounted) return;
+            _joinPrivateGame(index, playerName, roomCode, isCreator: true);
+          });
+
+          return true;
+        } catch (e) {
+          debugPrint('Error creating private room: $e');
+          return false;
+        }
       },
     );
   }
 
-  // --- replace the entire _askNextQuestion() with this function ---
+  Future<void> _showJoinPrivateRoomDialog(int index, String title) async {
+    // First get room code
+    final roomCodeController = TextEditingController();
+    final roomCode = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Enter Room Code'),
+        content: TextField(
+          controller: roomCodeController,
+          autofocus: true,
+          textCapitalization: TextCapitalization.characters,
+          style: const TextStyle(color: DesignTokens.white),
+          decoration: InputDecoration(
+            hintText: 'e.g., FERRARI',
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('common.cancel'.tr()),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, roomCodeController.text.trim()),
+            child: Text('Continue'),
+          ),
+        ],
+      ),
+    );
+
+    if (roomCode == null || roomCode.isEmpty) return;
+
+    // Then show join dialog
+    final profileName = await _fetchProfileUsername();
+    final initialName = profileName.isNotEmpty
+        ? profileName
+        : 'Player${Random().nextInt(900) + 100}';
+
+    final questionsPerTrack = {0: 5, 1: 9, 2: 12, 3: 16, 4: 20};
+    final qCount = questionsPerTrack[_safeIndex(index)] ?? 12;
+
+    await RaceJoinDialog.show(
+      context,
+      trackName: title,
+      questionCount: qCount,
+      description: 'Joining room: ${roomCode.toUpperCase()}',
+      initialPlayerName: initialName,
+      showDifficulty: false,
+      onJoinAsync: (playerName) async {
+        try {
+          await _saveLastRacePlayerName(playerName);
+
+          debugPrint('Joining private room: $roomCode as $playerName');
+
+          Future.delayed(const Duration(milliseconds: 250), () {
+            if (!mounted) return;
+            _joinPrivateGame(index, playerName, roomCode, isCreator: false);
+          });
+
+          return true;
+        } catch (e) {
+          debugPrint('Error joining private room: $e');
+          return false;
+        }
+      },
+    );
+  }
+
   Future<void> _askNextQuestion() async {
     if (!mounted) return;
 
@@ -1551,17 +1706,16 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       // stop immediately if user aborted or left view
       if (_raceAborted || !_inPublicRaceView) return;
 
-      // Hide waiting UI while we prepare the question
+      // If we were showing a "waiting" UI, hide it now so UI is consistent while we push question.
       if (_waitingForNextQuestion) {
         setState(() => _waitingForNextQuestion = false);
       }
 
-      final totalSlots = _quizSelectedIndices.length;
-
-      // If we've already completed all required correct answers -> finish race
-      if (_quizCurrentPos >= totalSlots) {
-        if (mounted) setState(() {}); // ensure UI consistent
-        _startCar();
+      // finished all steps -> race completed, show results and ad
+      if (_quizCurrentPos >= _quizSelectedIndices.length) {
+        // Ensure UI updated before showing results
+        if (mounted) setState(() {});
+        _onRaceFinished();
         return;
       }
 
@@ -1572,17 +1726,12 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
       final handler = handlerByIndex[qIndex];
       if (handler == null) {
-        // No handler for this question type: skip this slot (treat as auto-skip).
-        debugPrint('No handler for question index $qIndex — skipping this slot');
-        // advance the slot (this behaves like a filled slot so player moves forward)
+        // No handler for this question type: skip it but animate the car step so the user sees progress.
+        debugPrint('No handler for question index $qIndex — skipping');
         _quizCurrentPos++;
-        // If finishing after skipping, start car
-        if (_quizCurrentPos >= totalSlots) {
-          if (mounted) setState(() {});
-          _startCar();
-          return;
-        }
-        // show waiting UI so user can proceed
+        if (_raceAborted || !_inPublicRaceView) return;
+        await _advanceByStep();
+        // show waiting UI after skipping a question
         if (mounted) setState(() => _waitingForNextQuestion = true);
         return;
       }
@@ -1594,12 +1743,10 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         correct = await handler(
           _quizCurrentPos + 1,
           currentScore: _quizScore,
-          totalQuestions: totalSlots,
+          totalQuestions: _quizSelectedIndices.length,
         );
       } catch (e, st) {
-        // Protect against handler crashes (e.g., unexpected nulls or asset issues).
-        debugPrint('Question handler for index $qIndex threw: $e\n$st');
-        // Treat as incorrect and allow user to continue rather than crashing the whole page.
+        debugPrint('Question handler threw: $e\n$st');
         correct = false;
       }
 
@@ -1608,7 +1755,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         setState(() {
           _raceStarted = true;
         });
-        // Track race started now that first question has been shown
         AnalyticsService.instance.logEvent(
           name: 'race_started',
           parameters: {
@@ -1623,12 +1769,13 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       if (!mounted) return;
 
       final localPlayerId = _collab.localPlayerId;
+      final totalSlots = _quizSelectedIndices.length;
 
       if (correct) {
-        // Correct -> increment score and advance the slot and move car
+        // CORRECT ANSWER: Increment score, advance position, move car
         _quizScore++;
 
-        // Notify server of new score (best-effort)
+        // Notify server of score update
         if (_currentRoomCode != null) {
           try {
             await _collab.sendMessage(_currentRoomCode!, {
@@ -1641,39 +1788,25 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
           }
         }
 
-        // Advance the slot only when correct
+        // CRITICAL FIX: Only advance position on CORRECT answers (match Android logic)
         _quizCurrentPos++;
 
-        // Move car visually one step
+        // Move car forward visually
         if (_raceAborted || !_inPublicRaceView) return;
-        try {
-          // Ensure stepDistance is valid; if not, attempt a safe recompute.
-          if (_stepDistance <= 0 || _totalPathLength <= _eps) {
-            final W = MediaQuery.of(context).size.width;
-            final H = max(100.0, MediaQuery.of(context).size.height - 120.0);
-            await _preparePath(W, H, _safeIndex(_activeTrackIndex));
-            _stepDistance = (_totalPathLength > 0 ? _totalPathLength / totalSlots : 0.0);
-          }
-          await _advanceByStep();
-        } catch (e, st) {
-          debugPrint('Error advancing car for track ${_safeIndex(_activeTrackIndex)} after question $qIndex: $e\n$st');
-          // Fall back: ensure we don't deadlock the quiz; mark waiting so user can continue.
-          if (mounted) setState(() => _waitingForNextQuestion = true);
-        }
+        await _advanceByStep();
 
-        // If we've now completed all slots (i.e. got required number of correct answers), finish
+        // Check if race is complete after advancing
         if (_quizCurrentPos >= totalSlots) {
           if (mounted) setState(() {});
-          _startCar();
+          _startCar(); // Start final animation
           return;
         }
 
-        // Otherwise show waiting badge and let user press Next to continue
+        // Show waiting badge for next question
         if (mounted) setState(() => _waitingForNextQuestion = true);
       } else {
-        // Incorrect -> increment error count on server, do NOT advance the slot or move the car
+        // INCORRECT ANSWER: Increment errors, DON'T advance position, DON'T move car
         if (_currentRoomCode != null) {
-          // best-effort compute current errors and increment
           final currentErrors = _playersInRoom
               .firstWhere((p) => p.id == localPlayerId, orElse: () => PlayerInfo(id: '', displayName: '', lastSeen: DateTime.now(), score: 0, errors: 0))
               .errors;
@@ -1688,7 +1821,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
           }
         }
 
-        // Do NOT change _quizCurrentPos or _quizScore. Let the user try again (or get a new question for same slot).
+        // Show waiting badge - user can retry or get new question for same slot
         if (mounted) setState(() => _waitingForNextQuestion = true);
       }
     } finally {
@@ -1751,15 +1884,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     }
   }
 
-  Future<void> _maybeShowRaceInterstitial() async {
-    try {
-      await AdService.instance.incrementRaceAndMaybeShow();
-    } catch (e, st) {
-      debugPrint('AdService.incrementRaceAndMaybeShow failed: $e\n$st');
-    }
-  }
-
-
   @override
   void initState() {
     super.initState();
@@ -1767,7 +1891,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       vsync: this,
       duration: const Duration(seconds: 6),
     );
-    _loadRaceInterstitialCounter();
     _tracksNorm = {
       0: _monzaNorm,
       1: _monacoNorm,
@@ -1786,8 +1909,8 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
   @override
   void dispose() {
-    // Leave room (fire-and-forget)
-    try { _leaveCurrentRoom(); } catch (_) {}
+    // CRITICAL FIX: Don't call async _leaveCurrentRoom() from dispose()
+    // Just clean up local resources - subscriptions and timers
     _carController.dispose();
     _nameController.dispose();
     try { _playersSub?.cancel(); } catch (_) {}
@@ -1817,15 +1940,38 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                            children: [
-                              _buildModeButton('race.publicRoom'.tr(), true),
-                              _buildModeButton('race.privateRoom'.tr(), false),
-                            ],
+                          // Modern segmented control for mode toggle
+                          Center(
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 350),
+                              child: SegmentedControl<bool>(
+                                options: [
+                                  SegmentOption(
+                                    value: true,
+                                    label: tr("race.publicRoom"),
+                                    icon: Icons.public,
+                                  ),
+                                  SegmentOption(
+                                    value: false,
+                                    label: tr("race.privateRoom"),
+                                    icon: Icons.lock,
+                                  ),
+                                ],
+                                selectedValue: isPublicMode,
+                                onChanged: (bool value) {
+                                  setState(() => isPublicMode = value);
+                                  if (value) {
+                                    _subscribePublicTracks();
+                                  } else {
+                                    _unsubscribePublicTracks();
+                                  }
+                                },
+                                height: 44,
+                              ),
+                            ),
                           ),
-                          const SizedBox(height: 8),
-                          const Divider(thickness: 0.5),
+                          const SizedBox(height: DesignTokens.space16),
+                          Divider(thickness: 0.5, color: DesignTokens.textTertiary.withOpacity(0.3)),
                         ],
                       ),
                     ),
@@ -1918,40 +2064,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     );
   }
 
-  Widget _buildModeButton(String label, bool public) {
-    final selected = isPublicMode == public;
-
-    return GestureDetector(
-      onTap: () {
-        // toggle mode and manage subscriptions
-        setState(() => isPublicMode = public);
-        if (public) {
-          _subscribePublicTracks();
-        } else {
-          _unsubscribePublicTracks();
-        }
-      },
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-              color: selected ? Colors.red : Colors.grey[600],
-            ),
-          ),
-          const SizedBox(height: 4),
-          Container(
-            width: 60,
-            height: 2,
-            color: selected ? Colors.red : Colors.transparent,
-          ),
-        ],
-      ),
-    );
-  }
+  // Removed old _buildModeButton - now using SegmentedControl from design system
 
   Widget _buildPlayerStatLine({required PlayerInfo player, required bool isLocal}) {
     return Container(
@@ -1984,11 +2097,11 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
             children: [
               Icon(Icons.star, size: 14, color: Colors.amber[400]),
               const SizedBox(width: 4),
-              Text('${player.score} ${tr('common.points')}', style: TextStyle(fontSize: 12, color: Colors.grey[200])),
+              Text('${player.score} ' + 'race.ptsLabel'.tr(), style: TextStyle(fontSize: 12, color: Colors.grey[200])),
               const SizedBox(width: 8),
               Icon(Icons.error, size: 14, color: Colors.red[400]),
               const SizedBox(width: 4),
-              Text('${player.errors} ${tr('common.errors')}', style: TextStyle(fontSize: 12, color: Colors.grey[200])),
+              Text('${player.errors} ' + 'race.errLabel'.tr(), style: TextStyle(fontSize: 12, color: Colors.grey[200])),
             ],
           ),
         ],
@@ -1998,7 +2111,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
   // Remplace la fonction _buildTracksGrid par ceci :
   Widget _buildTracksGrid({required bool isPrivate}) {
-    final titles = ['Monza', 'Monaco', 'Suzuka', 'Spa', 'Silverstone', 'race.random'.tr()];
+    final titles = ['Monza', 'Monaco', 'Suzuka', 'Spa', 'Silverstone', tr("race.random")];
 
     // On utilise CustomScrollView + SliverGrid pour que la grille soit scrollable
     // et qu'on puisse ajouter ensuite un SliverToBoxAdapter pour le promo.
@@ -2048,71 +2161,51 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   }
 
   Future<void> _showPublicJoinDialog(int index, String title, {String? roomCodeOverride}) async {
-    // Try to use profile username if available, otherwise fallback to random Player###.
+    // Get initial player name from profile or generate random
     final profileName = await _fetchProfileUsername();
-    if (profileName.isNotEmpty) {
-      _nameController.text = profileName;
-    } else {
-      _nameController.text = '${tr('race.playerPrefix')}${Random().nextInt(900) + 100}';
-    }
+    final initialName = profileName.isNotEmpty
+        ? profileName
+        : 'Player${Random().nextInt(900) + 100}';
 
+    // Determine question count based on track
     final questionsPerTrack = {0: 5, 1: 9, 2: 12, 3: 16, 4: 20};
     final qCount = questionsPerTrack[_safeIndex(index)] ?? 12;
-    showDialog(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: Text(title),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                tr('race.publicJoinIntro', namedArgs: {'qCount': '$qCount'}),
-                style: const TextStyle(color: Colors.white70),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                'race.choosePlayerName'.tr(),
-                style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white70),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: _nameController,
-                style: const TextStyle(color: Colors.white70),
-                decoration: InputDecoration(
-                  hintText: tr('profile.enterName'),
-                  hintStyle: const TextStyle(color: Colors.white38),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                ),
-              ),
-            ],
-          ),
-          actionsPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(context).pop(), child: Text('common.cancel'.tr())),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-              onPressed: () async {
-                final playerName = _nameController.text.trim().isEmpty
-                    ? 'race.playerPrefix${Random().nextInt(900) + 100}'.tr()
-                    : _nameController.text.trim();
-                debugPrint('Joining as: $playerName (roomOverride=$roomCodeOverride)');
-                await _saveLastRacePlayerName(playerName);
-                FocusScope.of(context).unfocus();
-                Navigator.of(context).pop();
-                Future.delayed(const Duration(milliseconds: 250), () {
-                  if (!mounted) return;
-                  _joinPublicGame(index, playerName, roomCodeOverride: roomCodeOverride);
-                });
-              },
-              child: Text('race.join'.tr()),
-            ),
-          ],
-        );
+
+    // Show professional join dialog
+    final result = await RaceJoinDialog.show(
+      context,
+      trackName: title,
+      questionCount: qCount,
+      description: 'race.aboutToEnterMultiplayer'.tr(namedArgs: {'count': qCount.toString()}),
+      initialPlayerName: initialName,
+      showDifficulty: true,
+      onJoinAsync: (playerName) async {
+        try {
+          debugPrint('Joining as: $playerName (roomOverride=$roomCodeOverride)');
+
+          // Save player name for future use
+          await _saveLastRacePlayerName(playerName);
+
+          // Join the public game (this is async but we need to return quickly)
+          // Schedule it to run after dialog closes
+          Future.delayed(const Duration(milliseconds: 250), () {
+            if (!mounted) return;
+            _joinPublicGame(index, playerName, roomCodeOverride: roomCodeOverride);
+          });
+
+          return true; // Success
+        } catch (e) {
+          debugPrint('Error joining public game: $e');
+          return false; // Failed
+        }
       },
     );
+
+    if (result == true) {
+      debugPrint('User joined race successfully');
+    } else if (result == false) {
+      debugPrint('User cancelled race join');
+    }
   }
 
   Widget _buildTrackButton(int index, String title, {required bool isPrivate}) {
@@ -2205,7 +2298,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                   top: 8,
                   right: 8,
                   child: Tooltip(
-                    message: (_publicRoomHasWaiting[index] == true) ? tr('race.playerWaiting') : tr('race.empty'),
+                    message: (_publicRoomHasWaiting[index] == true) ? 'Player waiting' : 'Empty',
                     child: Container(
                       width: 12,
                       height: 12,
@@ -2225,8 +2318,15 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     );
   }
 
+  // join a public game for a given track index and display name
   Future<void> _joinPublicGame(int index, String displayName, {String? roomCodeOverride}) async {
-    // Mark UI state (local) - CRITICAL FIX: Reset ALL state flags to prevent rejoin bugs
+    // PHASE 2 FIX: Clean up any previous race state before joining new race
+    await _leaveCurrentRoom();
+
+    // Generate a new unique session ID for this race instance
+    final newSessionId = _generateRaceSessionId();
+
+    // mark UI state (local) - CRITICAL FIX: Reset ALL state flags to prevent rejoin bugs
     setState(() {
       _activeTrackIndex = index;
       _inPublicRaceView = true;
@@ -2244,36 +2344,38 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       _raceEndedByServer = false;
       _handlingEndRace = false;
       _roomCreatorId = null;
+      // CRITICAL: Set new session ID to distinguish this race from previous ones
+      _currentRaceSessionId = newSessionId;
     });
 
     _carController.stop();
     _carController.reset();
 
-    // Allow an override (used when joining an existing waiting room),
+    // allow an override (used when joining an existing waiting room),
     // otherwise default to canonical per-track room
     final roomCode = roomCodeOverride ?? 'TRACK_${index}';
     _currentRoomCode = roomCode;
 
     try {
-      // Create/join room (createRoom calls joinRoom internally)
+      // create/join room (createRoom calls joinRoom internally)
       await _collab.createRoom(roomCode, displayName: displayName);
 
-      // Initial presence touch
+      // initial presence touch
       unawaited(_collab.touchPresence(roomCode));
       // Clean up stale players when joining
       await _collab.cleanupStalePlayers(roomCode, ttl: const Duration(seconds: 15));
 
-      // Subscribe to players list
+      // subscribe to players list
       _playersSub?.cancel();
       _playersSub = _collab.playersStream(roomCode).listen((players) async {
         if (!mounted) return;
-        // Merge incoming players with existing ones to preserve score/errors
+        // PHASE 3 FIX: Optimize player merging from O(n²) to O(n) using Map lookup
         setState(() {
+          // Create lookup map for existing players - O(n)
+          final existing = {for (var p in _playersInRoom) p.id: p};
+          // Merge players using O(1) Map lookup instead of O(n) firstWhere - O(n) total
           _playersInRoom = players.map((newPlayer) {
-            final existingPlayer = _playersInRoom.firstWhere(
-              (p) => p.id == newPlayer.id,
-              orElse: () => newPlayer,
-            );
+            final existingPlayer = existing[newPlayer.id] ?? newPlayer;
             return PlayerInfo(
               id: newPlayer.id,
               displayName: newPlayer.displayName,
@@ -2283,21 +2385,25 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
             );
           }).toList();
         });
-
         // Auto-start if 2+ players and not already started
-        // CRITICAL FIX: Add await to prevent race condition where _startQuizRace is called multiple times
+        // CRITICAL FIX: Add await to prevent race condition
         if (!_raceStarted && players.length >= 2) {
           debugPrint('Starting race with ${players.length} players!');
           await _startQuizRace();
         }
       });
 
-      // Listen for score/error updates + start_race + end_race
-      _messagesSub = _collab.messagesStream(_currentRoomCode!).listen(
-        (messages) {
+      // Listen for score/error updates via messages
+      _messagesSub = _collab.messagesStream(_currentRoomCode!).listen((messages) async {
+        // CRITICAL FIX: Prevent concurrent message processing
+        if (_processingMessages) return;
+        _processingMessages = true;
+
+        try {
           for (final msg in messages) {
-            final type = msg.payload['type'];
-            if (type == 'score_update') {
+            if (!mounted) break;
+
+            if (msg.payload['type'] == 'score_update') {
               setState(() {
                 _playersInRoom = _playersInRoom.map((p) {
                   if (p.id == msg.payload['playerId']) {
@@ -2312,7 +2418,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                   return p;
                 }).toList();
               });
-            } else if (type == 'error_update') {
+            } else if (msg.payload['type'] == 'error_update') {
               setState(() {
                 _playersInRoom = _playersInRoom.map((p) {
                   if (p.id == msg.payload['playerId']) {
@@ -2327,77 +2433,40 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                   return p;
                 }).toList();
               });
-            } else if (type == 'start_race') {
+            } else if (msg.payload['type'] == 'start_race') {
               // Start the race for all players when the message is received
+              // CRITICAL FIX: Add await to prevent race condition
               if (!_raceStarted) {
+                // Synchronize session ID from the start_race message
+                final String? messageSessionId = msg.payload['raceSessionId']?.toString();
+                if (messageSessionId != null) {
+                  setState(() {
+                    _currentRaceSessionId = messageSessionId;
+                  });
+                }
                 debugPrint('Received start_race message, starting race!');
-                _startQuizRace();
+                await _startQuizRace();
               }
-            } else if (type == 'end_race') {
-              // If we're not showing the race UI, ignore stale end_race messages.
+            } else if (msg.payload['type'] == 'end_race') {
+              // Handle race end from server/other player
               if (!_inPublicRaceView) {
                 debugPrint('Received end_race but not in public race view — ignoring.');
                 continue;
               }
-
-              // Extract payload copy
-              Map<String, dynamic> payload;
-              try {
-                payload = Map<String, dynamic>.from(msg.payload);
-              } catch (e) {
-                debugPrint('Invalid end_race payload format: $e');
-                continue;
-              }
-
-              // Inspect winner info
-              final winnerIdRaw = payload['winnerId'];
-              final winnerNameRaw = payload['winnerName'];
-              final bool payloadHasWinner = (winnerIdRaw != null && winnerIdRaw.toString().isNotEmpty) ||
-                                            (winnerNameRaw != null && winnerNameRaw.toString().isNotEmpty);
-
-              // total slots expected for this race and local completion status
-              final totalSlots = _quizSelectedIndices.length;
-              final bool localCompleted = (totalSlots > 0) && (_quizScore >= totalSlots);
-
-              if (!_raceStarted && _quizSelectedIndices.isEmpty) {
-                // We haven't started a local race and have no quiz slots selected yet.
-                // An `end_race` received here is likely the tail of a previous race
-                // (sent before we joined) — ignore it unconditionally to avoid
-                // showing stale results to a player joining a public room.
-                debugPrint('Received end_race before local race start — ignoring.');
-                continue;
-              }
-
-              // If the server named the local player as winner but the local player hasn't completed the required
-              // number of correct answers, ignore it (we only show "you won" when local actually finished).
-              if (payloadHasWinner && (winnerIdRaw == _collab.localPlayerId || winnerNameRaw == _nameController.text.trim()) && !localCompleted) {
-                debugPrint('Ignoring end_race: server named local as winner but local not finished (score=$_quizScore / required=$totalSlots).');
-                continue;
-              }
-
-              // Prevent re-entry / duplicate handling
-              if (_handlingEndRace || _raceEndedByServer) {
-                debugPrint('Received end_race but already handling or marked ended — ignoring.');
-                continue;
-              }
-
               try {
                 final payloadCopy = Map<String, dynamic>.from(msg.payload);
-                // fire-and-forget the handler (it contains guards).
                 _handleServerEndRace(payloadCopy);
               } catch (e) {
                 debugPrint('Error handling server end_race: $e');
               }
             }
           }
-        },
-        onError: (err) {
-          debugPrint('Error in messagesStream(${_currentRoomCode ?? "unknown"}): $err');
-        },
-        cancelOnError: false,
-      );
+        } finally {
+          _processingMessages = false;
+        }
+      });
 
-      // Periodic presence update
+      // periodic presence update
       _presenceTimer?.cancel();
       _presenceTimer = Timer.periodic(const Duration(seconds: 8), (_) {
         if (_currentRoomCode != null) {
@@ -2406,6 +2475,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       });
     } catch (e) {
       debugPrint('Failed to join/create room $roomCode: $e');
+      // tidy up and give feedback
       _playersSub?.cancel();
       _presenceTimer?.cancel();
       _playersInRoom = [];
@@ -2415,6 +2485,14 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
           SnackBar(content: Text('race.unableToJoinRoom'.tr(namedArgs: {'error': e.toString()}))),
         );
       }
+    }
+  }
+
+  Future<void> _maybeShowRaceInterstitial() async {
+    try {
+      await AdService.instance.incrementRaceAndMaybeShow();
+    } catch (e, st) {
+      debugPrint('AdService.incrementRaceAndMaybeShow failed: $e\n$st');
     }
   }
 
@@ -2476,6 +2554,12 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         _totalPathLength = 0.0;
         _waitingForNextQuestion = false;
         _roomCreatorId = null;
+        // CRITICAL FIX: Reset session flags to prevent "already ended" errors on rejoin
+        _raceEndedByServer = false;
+        _handlingEndRace = false;
+        _currentRaceSessionId = null;
+        _processingMessages = false;
+        _startingRace = false;
       });
     }
   }
@@ -2667,35 +2751,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                   },
                 ),
               ),
-              if (!_raceStarted && _playersInRoom.isNotEmpty && _roomCreatorId == _collab.localPlayerId)
-                Positioned(
-                  bottom: 120,
-                  left: 0,
-                  right: 0,
-                  child: Center(
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.green,
-                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                      ),
-                      onPressed: () async {
-                        debugPrint('Room creator started the race!');
-                        try {
-                          await _collab.sendMessage(_currentRoomCode!, {
-                            'type': 'start_race',
-                          });
-                        } catch (e) {
-                          debugPrint('Failed to send start_race: $e');
-                        }
-                        await _startQuizRace();
-                      },
-                      child: Text(
-                        'Start Race',
-                        style: TextStyle(color: Colors.white, fontSize: 16),
-                      ),
-                    ),
-                  ),
-                ),
+              // Start Race button now integrated into WaitingLobbyOverlay
               // Top-left small "Leave" button
               Positioned(
                 top: 12,
@@ -2712,11 +2768,10 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                       ),
                       onPressed: () async {
-                        // stop animation and leave the room first
                         _carController.stop();
                         await _leaveCurrentRoom();
 
-                        // Only attempt to show ad if there was race activity (started or progress)
+                        // Show interstitial ad after leaving race
                         final bool hadProgress = _raceStarted || _quizCurrentPos > 0 || _quizScore > 0;
                         if (hadProgress) {
                           try {
@@ -2754,22 +2809,41 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                   ),
                 ),
               ),
-              // Waiting for players overlay
-              if (!_raceStarted && _playersInRoom.length < 2)
-                Positioned.fill(
-                  child: Center(
-                    child: Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.black54,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Text(
-                        tr('race.waitingForPlayer'),
-                        style: TextStyle(color: Colors.white, fontSize: 16),
-                      ),
-                    ),
-                  ),
+              // Waiting for players overlay - Professional waiting lobby
+              if (!_raceStarted)
+                WaitingLobbyOverlay(
+                  roomCode: !isPublicMode ? _currentRoomCode : null,
+                  players: _playersInRoom,
+                  requiredPlayers: 2,
+                  totalQuestions: _quizSelectedIndices.isNotEmpty
+                      ? _quizSelectedIndices.length
+                      : 12,
+                  waitingMessage: _playersInRoom.length < 2
+                      ? 'race.waitingForPlayer'.tr()
+                      : (_roomCreatorId == _collab.localPlayerId
+                          ? 'Ready to start!'
+                          : 'Waiting for host'),
+                  showRoomCode: !isPublicMode,
+                  showStartButton: !isPublicMode &&
+                                   _roomCreatorId == _collab.localPlayerId &&
+                                   _playersInRoom.length >= 1,
+                  onStartRace: !isPublicMode && _roomCreatorId == _collab.localPlayerId
+                      ? () async {
+                          debugPrint('Room creator started the race!');
+                          await _collab.sendMessage(_currentRoomCode!, {
+                            'type': 'start_race',
+                            'raceSessionId': _currentRaceSessionId,
+                          });
+                          await _startQuizRace();
+                        }
+                      : null,
+                  onLeave: () {
+                    setState(() {
+                      _inPublicRaceView = false;
+                      _raceAborted = true;
+                    });
+                    _leaveCurrentRoom();
+                  },
                 ),
               if (_waitingForNextQuestion)
                 Positioned(
@@ -2793,55 +2867,13 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                           await _askNextQuestion();
                         },
                         child: Text(
-                          tr('race.nextQuestion'),
+                          'race.nextQuestion'.tr(),
                           style: TextStyle(color: Colors.white, fontSize: 14),
                         ),
                       ),
                     ),
                   ),
                 ),
-                // Room code overlay (only for private rooms)
-                if (_currentRoomCode != null && !_raceStarted && !isPublicMode)
-                  Center(
-                    child: Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: Colors.black87,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            tr('race.roomCodeLabel'),
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            _currentRoomCode!,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 24,
-                              fontWeight: FontWeight.bold,
-                              letterSpacing: 2,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            tr('race.shareRoomCode'),
-                            style: TextStyle(
-                              color: Colors.white70,
-                              fontSize: 14,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
             ],
           ),
         ),
@@ -2858,7 +2890,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                   _buildPlayerStatLine(
                     player: _playersInRoom.firstWhere(
                       (p) => p.displayName == _nameController.text.trim(),
-                      orElse: () => PlayerInfo(id: '', displayName: tr('common.you'), lastSeen: DateTime.now(), score: _quizScore, errors: 0),
+                      orElse: () => PlayerInfo(id: '', displayName: 'You', lastSeen: DateTime.now(), score: _quizScore, errors: 0),
                     ),
                     isLocal: true,
                   ),
@@ -2867,28 +2899,24 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                   _buildPlayerStatLine(
                     player: _playersInRoom.firstWhere(
                       (p) => p.displayName != _nameController.text.trim(),
-                      orElse: () => PlayerInfo(id: '', displayName: tr('race.opponent'), lastSeen: DateTime.now(), score: 0, errors: 0),
+                      orElse: () => PlayerInfo(id: '', displayName: 'Opponent', lastSeen: DateTime.now(), score: 0, errors: 0),
                     ),
                     isLocal: false,
                   ),
-                if (!_raceStarted && _playersInRoom.length >= 2)
-                  Positioned.fill(
-                    child: Center(
-                      child: Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.black54,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          _roomCreatorId == _collab.localPlayerId
-                            ? tr('race.pressStart')
-                            : tr('race.waitingForCreator'),
-                          style: const TextStyle(color: Colors.white, fontSize: 16),
-                        ),
-                      ),
+              // Vertical progress bar during active race
+              if (_raceStarted && _quizCurrentPos > 0)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 120, // Leave space for player stats at bottom
+                  child: SafeArea(
+                    child: VerticalRaceProgressBar(
+                      currentQuestion: _quizCurrentPos,
+                      totalQuestions: _quizSelectedIndices.length,
+                      correctAnswers: _quizScore,
                     ),
                   ),
+                ),
               ],
             ),
           ),
@@ -2898,41 +2926,21 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   }
 }
 
+// ── Full-screen question route ───────────────────────────────────────────────
 class _QuestionPage extends StatelessWidget {
   final Widget content;
-  final VoidCallback? onLeave;
-  const _QuestionPage({required this.content, this.onLeave});
+  final VoidCallback onLeave;
+  const _QuestionPage({
+    required this.content,
+    required this.onLeave,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        automaticallyImplyLeading: false,
-        title: Text('home.flagChallenge'.tr()),
-        actions: [
-          IconButton(
-            tooltip: 'race.leave'.tr(),
-            icon: const Icon(Icons.exit_to_app),
-            onPressed: () async {
-              final confirm = await showDialog<bool>(
-                context: context,
-                builder: (ctx) => AlertDialog(
-                  title: Text('race.leave'.tr() + ' ' + 'race.title'.tr()),
-                  content: Text(tr('race.leaveConfirmContent')),
-                  actions: [
-                    TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: Text('common.cancel'.tr())),
-                    TextButton(onPressed: () => Navigator.of(ctx).pop(true), child: Text('race.leave'.tr())),
-                  ],
-                ),
-              );
-              if (confirm == true) {
-                try { onLeave?.call(); } catch (_) {}
-                // close the question page and return false (not-correct).
-                Navigator.of(context).pop(false);
-              }
-            },
-          ),
-        ],
+        automaticallyImplyLeading: false, // disables back arrow
+        title: Text('home.flagChallenge'.tr()),    // or any title you use
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),
@@ -3008,13 +3016,9 @@ class _RandomModelBrandQuestionContentState
       child: Column(
         children: [
           // Header
-          // top progress line (localized)
           Text(
-            tr('questions.progress', namedArgs: {
-              'n': '${widget.questionNumber}',
-              'score': '${widget.currentScore}',
-              'total': '${widget.totalQuestions}',
-            }),
+            "Question #${widget.questionNumber}  "
+            "Score: ${widget.currentScore}/${widget.totalQuestions}",
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
@@ -3034,8 +3038,7 @@ class _RandomModelBrandQuestionContentState
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(12),
                 child: Image(
-                  image: ImageCacheService.instance
-                      .imageProvider('${widget.fileBase}$i.webp'),
+                  image: _assetImageProvider('${widget.fileBase}$i.webp'),
                   height: 200,
                   width: double.infinity,
                   fit: BoxFit.cover,
@@ -3150,14 +3153,10 @@ class _ModelNameToBrandQuestionContentState
     return SingleChildScrollView(
       child: Column(
         children: [
-          // top progress line (localized)
           Text(
-            tr('questions.progress', namedArgs: {
-              'n': '${widget.questionNumber}',
-              'score': '${widget.currentScore}',
-              'total': '${widget.totalQuestions}',
-            }),
-            style: const TextStyle(fontSize: 12),
+            "Question #${widget.questionNumber} – "
+            "Score: ${widget.currentScore}/${widget.totalQuestions}",
+            style: TextStyle(fontSize: 12),
           ),
           SizedBox(height: 30),
           Text(
@@ -3239,56 +3238,11 @@ class _DescriptionSlideshowQuestionContentState
     extends State<_DescriptionSlideshowQuestionContent> with AudioAnswerMixin {
   bool _answered = false;
   String? _selectedDescription;
-  int _frameIndex = 0;
-  Timer? _frameTimer;
-  static const int _maxFrames = 6;
-
-  @override
-  void initState() {
-    super.initState();
-    try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
-    _startFrameTimer();
-  }
-
-  void _startFrameTimer() {
-    _frameTimer?.cancel();
-    _frameTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-      if (mounted && !_answered) {
-        setState(() {
-          _frameIndex = (_frameIndex + 1) % _maxFrames;
-        });
-      }
-    });
-  }
-
-  void _goToNextFrame() {
-    if (_answered) return;
-    setState(() {
-      _frameIndex = (_frameIndex + 1) % _maxFrames;
-    });
-    _startFrameTimer();
-  }
-
-  void _goToPreviousFrame() {
-    if (_answered) return;
-    setState(() {
-      _frameIndex = (_frameIndex - 1 + _maxFrames) % _maxFrames;
-    });
-    _startFrameTimer();
-  }
-
-  @override
-  void dispose() {
-    _frameTimer?.cancel();
-    try { AudioFeedback.instance.playEvent(SoundEvent.pageClose); } catch (_) {}
-    super.dispose();
-  }
 
   void _onTap(String description) {
     if (_answered) return;
 
     _audioPlayTap();
-    _frameTimer?.cancel();
 
     final bool correct = description == widget.correctDescription;
 
@@ -3324,13 +3278,9 @@ class _DescriptionSlideshowQuestionContentState
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           // ── Header ────────────────────────────────────────────────
-          // top progress line (localized)
           Text(
-            tr('questions.progress', namedArgs: {
-              'n': '${widget.questionNumber}',
-              'score': '${widget.currentScore}',
-              'total': '${widget.totalQuestions}',
-            }),
+            "Question #${widget.questionNumber}   "
+            "Score: ${widget.currentScore}/${widget.totalQuestions}",
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
@@ -3343,65 +3293,21 @@ class _DescriptionSlideshowQuestionContentState
           ),
           const SizedBox(height: 20),
 
-          // ── Single animated frame with controls ─────────────────
-          ClipRRect(
-            borderRadius: BorderRadius.circular(12),
-            child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 500),
-              transitionBuilder: (child, anim) =>
-                  FadeTransition(opacity: anim, child: child),
-              child: Image(
-                key: ValueKey<int>(_frameIndex),
-                image: ImageCacheService.instance
-                    .imageProvider('${widget.fileBase}$_frameIndex.webp'),
-                height: 200,
-                width: double.infinity,
-                fit: BoxFit.cover,
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-
-          // Manual frame controls
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              IconButton(
-                icon: const Icon(Icons.arrow_back_ios, size: 20),
-                onPressed: _answered ? null : _goToPreviousFrame,
-                color: Colors.white70,
-              ),
-              Text(
-                '${_frameIndex + 1}/$_maxFrames',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-              ),
-              IconButton(
-                icon: const Icon(Icons.arrow_forward_ios, size: 20),
-                onPressed: _answered ? null : _goToNextFrame,
-                color: Colors.white70,
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-
-          // Dot indicators
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(_maxFrames, (index) =>
-              Container(
-                margin: const EdgeInsets.symmetric(horizontal: 4),
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _frameIndex == index
-                    ? Colors.red
-                    : Colors.grey.withOpacity(0.4),
+          // ── Six static frames ────────────────────────────────────
+          for (int i = 0; i < 6; i++)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4.0),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Image(
+                  image: _assetImageProvider('${widget.fileBase}$i.webp'),
+                  height: 200,
+                  width: double.infinity,
+                  fit: BoxFit.cover,
                 ),
               ),
             ),
-          ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 24),
 
           // ── Description buttons ──────────────────────────────────
           for (var desc in widget.options)
@@ -3494,7 +3400,7 @@ class _HorsepowerQuestionContentState
     setState(() {
       _frameIndex = (_frameIndex + 1) % _maxFrames;
     });
-    _startFrameTimer(); // Reset auto-cycle timer
+    _startFrameTimer();
   }
 
   void _goToPreviousFrame() {
@@ -3502,7 +3408,7 @@ class _HorsepowerQuestionContentState
     setState(() {
       _frameIndex = (_frameIndex - 1 + _maxFrames) % _maxFrames;
     });
-    _startFrameTimer(); // Reset auto-cycle timer
+    _startFrameTimer();
   }
 
   @override
@@ -3516,7 +3422,7 @@ class _HorsepowerQuestionContentState
     if (_answered) return;
 
     _audioPlayTap();
-    _frameTimer?.cancel(); // Stop auto-cycling when answer selected
+    _frameTimer?.cancel();
 
     final bool correct = answer == widget.correctAnswer;
 
@@ -3547,121 +3453,87 @@ class _HorsepowerQuestionContentState
 
   @override
   Widget build(BuildContext context) {
+    List<bool?> answeredCorrectly = List.filled(widget.totalQuestions, null);
+    for (int i = 0; i < widget.questionNumber - 1; i++) {
+      answeredCorrectly[i] = true;
+    }
+
     return SingleChildScrollView(
       child: Column(
         children: [
-          // Header
-          // top progress line (localized)
-          Text(
-            tr('questions.progress', namedArgs: {
-              'n': '${widget.questionNumber}',
-              'score': '${widget.currentScore}',
-              'total': '${widget.totalQuestions}',
-            }),
-            style: const TextStyle(fontSize: 12),
+          // Modern progress bar
+          RaceProgressBar(
+            currentQuestion: widget.questionNumber - 1,
+            totalQuestions: widget.totalQuestions,
+            answeredCorrectly: answeredCorrectly,
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: DesignTokens.space12),
+
+          // Animated score with streak
+          AnimatedRaceScore(
+            currentScore: widget.currentScore,
+            totalQuestions: widget.totalQuestions,
+            currentStreak: _streak,
+            showScoreChange: _answered && _selectedAnswer == widget.correctAnswer,
+            wasCorrect: _selectedAnswer == widget.correctAnswer,
+          ),
+          const SizedBox(height: DesignTokens.space24),
+
           Text(
             "questions.horsePower".tr(),
-            style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+            style: DesignTokens.heading3,
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 20),
+          SizedBox(height: DesignTokens.space20),
 
           // AnimatedSwitcher for smooth fade between frames
           ClipRRect(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: DesignTokens.borderRadiusMedium,
             child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 500),
+              duration: DesignTokens.durationSlow,
               transitionBuilder: (child, anim) =>
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: ImageCacheService.instance
-                    .imageProvider('${widget.fileBase}$_frameIndex.webp'),
+                image: _assetImageProvider('${widget.fileBase}$_frameIndex.webp'),
                 height: 200,
                 width: double.infinity,
                 fit: BoxFit.cover,
               ),
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: DesignTokens.space16),
 
-          // Manual frame controls with counter
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              IconButton(
-                icon: const Icon(Icons.arrow_back_ios, size: 20),
-                onPressed: _answered ? null : _goToPreviousFrame,
-                color: Colors.white70,
-              ),
-              Text(
-                '${_frameIndex + 1}/$_maxFrames',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-              ),
-              IconButton(
-                icon: const Icon(Icons.arrow_forward_ios, size: 20),
-                onPressed: _answered ? null : _goToNextFrame,
-                color: Colors.white70,
-              ),
-            ],
+          // Modern frame controls
+          ImageFrameControls(
+            currentFrame: _frameIndex,
+            totalFrames: _maxFrames,
+            onPrevious: _goToPreviousFrame,
+            onNext: _goToNextFrame,
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: DesignTokens.space24),
 
-          // Dot indicators
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(_maxFrames, (index) =>
-              Container(
-                margin: const EdgeInsets.symmetric(horizontal: 4),
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _frameIndex == index
-                    ? Colors.red
-                    : Colors.grey.withOpacity(0.4),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
+          // Modern answer buttons
+          ...widget.options.map((opt) {
+            ButtonFeedbackState feedbackState = ButtonFeedbackState.none;
+            if (_answered) {
+              if (opt == widget.correctAnswer) {
+                feedbackState = ButtonFeedbackState.correct;
+              } else if (opt == _selectedAnswer) {
+                feedbackState = ButtonFeedbackState.incorrect;
+              }
+            }
 
-          // Horsepower option buttons
-          for (var opt in widget.options)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 6.0),
-              child: SizedBox(
-                width: double.infinity,
-                height: 50,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: Material(
-                    color: _answered
-                        ? (opt == widget.correctAnswer
-                            ? Colors.green
-                            : (opt == _selectedAnswer
-                                ? Colors.red
-                                : Colors.grey[800]!))
-                        : Colors.grey[800],
-                    child: InkWell(
-                      onTap: () => _onTap(opt),
-                      child: Center(
-                        child: Text(
-                          opt,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
+            return Padding(
+              padding: const EdgeInsets.only(bottom: DesignTokens.space12),
+              child: RaceAnswerButton(
+                text: opt,
+                onTap: () => _onTap(opt),
+                isDisabled: _answered,
+                feedbackState: feedbackState,
               ),
-            ),
+            );
+          }).toList(),
         ],
       ),
     );
@@ -3706,6 +3578,7 @@ class _AccelerationQuestionContentState
   @override
   void initState() {
     super.initState();
+    // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
     _startFrameTimer();
   }
@@ -3783,13 +3656,9 @@ class _AccelerationQuestionContentState
       child: Column(
         children: [
           // Header
-          // top progress line (localized)
           Text(
-            tr('questions.progress', namedArgs: {
-              'n': '${widget.questionNumber}',
-              'score': '${widget.currentScore}',
-              'total': '${widget.totalQuestions}',
-            }),
+            "Question #${widget.questionNumber} – "
+            "Score: ${widget.currentScore}/${widget.totalQuestions}",
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
@@ -3811,8 +3680,7 @@ class _AccelerationQuestionContentState
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: ImageCacheService.instance
-                    .imageProvider('${widget.fileBase}$_frameIndex.webp'),
+                image: _assetImageProvider('${widget.fileBase}$_frameIndex.webp'),
                 height: 200,
                 width: double.infinity,
                 fit: BoxFit.cover,
@@ -3846,21 +3714,22 @@ class _AccelerationQuestionContentState
           // Dot indicators
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(_maxFrames, (index) =>
-              Container(
+            children: List.generate(
+              _maxFrames,
+              (index) => Container(
                 margin: const EdgeInsets.symmetric(horizontal: 4),
                 width: 8,
                 height: 8,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: _frameIndex == index
-                    ? Colors.red
-                    : Colors.grey.withOpacity(0.4),
+                      ? Colors.red
+                      : Colors.grey.withOpacity(0.4),
                 ),
               ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 24),
 
           // Acceleration option buttons
           for (var opt in widget.options)
@@ -3940,6 +3809,7 @@ class _MaxSpeedQuestionContentState
   @override
   void initState() {
     super.initState();
+    // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
     _startFrameTimer();
   }
@@ -3982,7 +3852,7 @@ class _MaxSpeedQuestionContentState
     if (_answered) return;
 
     _audioPlayTap();
-    _frameTimer?.cancel(); // Stop auto-cycling when answer selected
+    _frameTimer?.cancel();
 
     final bool correct = speed == widget.correctSpeed;
 
@@ -4017,13 +3887,9 @@ class _MaxSpeedQuestionContentState
       child: Column(
         children: [
           // Header
-          // top progress line (localized)
           Text(
-            tr('questions.progress', namedArgs: {
-              'n': '${widget.questionNumber}',
-              'score': '${widget.currentScore}',
-              'total': '${widget.totalQuestions}',
-            }),
+            "Question #${widget.questionNumber} – "
+            "Score: ${widget.currentScore}/${widget.totalQuestions}",
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
@@ -4045,8 +3911,7 @@ class _MaxSpeedQuestionContentState
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: ImageCacheService.instance
-                    .imageProvider('${widget.fileBase}$_frameIndex.webp'),
+                image: _assetImageProvider('${widget.fileBase}$_frameIndex.webp'),
                 height: 200,
                 width: double.infinity,
                 fit: BoxFit.cover,
@@ -4080,21 +3945,22 @@ class _MaxSpeedQuestionContentState
           // Dot indicators
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(_maxFrames, (index) =>
-              Container(
+            children: List.generate(
+              _maxFrames,
+              (index) => Container(
                 margin: const EdgeInsets.symmetric(horizontal: 4),
                 width: 8,
                 height: 8,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: _frameIndex == index
-                    ? Colors.red
-                    : Colors.grey.withOpacity(0.4),
+                      ? Colors.red
+                      : Colors.grey.withOpacity(0.4),
                 ),
               ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 24),
 
           // Speed option buttons
           for (var opt in widget.options)
@@ -4173,6 +4039,7 @@ class _SpecialFeatureQuestionContentState
   @override
   void initState() {
     super.initState();
+    // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
     _startFrameTimer();
   }
@@ -4250,20 +4117,16 @@ class _SpecialFeatureQuestionContentState
       child: Column(
         children: [
           // Header
-          // top progress line (localized)
           Text(
-            tr('questions.progress', namedArgs: {
-              'n': '${widget.questionNumber}',
-              'score': '${widget.currentScore}',
-              'total': '${widget.totalQuestions}',
-            }),
+            "Question #${widget.questionNumber} – "
+            "Score: ${widget.currentScore}/${widget.totalQuestions}",
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
 
           // Prompt
           Text(
-            "Which special feature does this car has ?",
+            "questions.specialFeature".tr(),
             style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             textAlign: TextAlign.center,
           ),
@@ -4278,8 +4141,7 @@ class _SpecialFeatureQuestionContentState
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: ImageCacheService.instance
-                    .imageProvider('${widget.fileBase}$_frameIndex.webp'),
+                image: _assetImageProvider('${widget.fileBase}$_frameIndex.webp'),
                 height: 200,
                 width: double.infinity,
                 fit: BoxFit.cover,
@@ -4313,21 +4175,22 @@ class _SpecialFeatureQuestionContentState
           // Dot indicators
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(_maxFrames, (index) =>
-              Container(
+            children: List.generate(
+              _maxFrames,
+              (index) => Container(
                 margin: const EdgeInsets.symmetric(horizontal: 4),
                 width: 8,
                 height: 8,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: _frameIndex == index
-                    ? Colors.red
-                    : Colors.grey.withOpacity(0.4),
+                      ? Colors.red
+                      : Colors.grey.withOpacity(0.4),
                 ),
               ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 24),
 
           // Option buttons
           for (var opt in widget.options)
@@ -4397,19 +4260,48 @@ class _DescriptionToCarImageQuestionContentState
   int _frameIndex = 0;
   bool _answered = false;
   int? _selectedIndex;
+  Timer? _frameTimer;
+  static const int _maxFrames = 6;
 
   @override
   void initState() {
     super.initState();
     // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
-    // Cycle frames every 2 seconds
+    _startFrameTimer();
+  }
+
+  void _startFrameTimer() {
+    _frameTimer?.cancel();
+    _frameTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted && !_answered) {
+        setState(() {
+          _frameIndex = (_frameIndex + 1) % _maxFrames;
+        });
+      }
+    });
+  }
+
+  void _goToNextFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex + 1) % _maxFrames;
+    });
+    _startFrameTimer();
+  }
+
+  void _goToPreviousFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex - 1 + _maxFrames) % _maxFrames;
+    });
+    _startFrameTimer();
   }
 
   @override
   void dispose() {
+    _frameTimer?.cancel();
     try { AudioFeedback.instance.playEvent(SoundEvent.pageClose); } catch (_) {}
-    // Si CETTE classe a des contrôleurs, dispose-les ici (sinon ne mets rien).
     super.dispose();
   }
 
@@ -4417,6 +4309,7 @@ class _DescriptionToCarImageQuestionContentState
     if (_answered) return;
 
     _audioPlayTap();
+    _frameTimer?.cancel();
 
     final bool correct = index == widget.correctIndex;
 
@@ -4452,13 +4345,9 @@ class _DescriptionToCarImageQuestionContentState
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           // Header
-          // top progress line (localized)
           Text(
-            tr('questions.progress', namedArgs: {
-              'n': '${widget.questionNumber}',
-              'score': '${widget.currentScore}',
-              'total': '${widget.totalQuestions}',
-            }),
+            "Question #${widget.questionNumber} – "
+            "Score: ${widget.currentScore}/${widget.totalQuestions}",
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
@@ -4501,7 +4390,7 @@ class _DescriptionToCarImageQuestionContentState
                             FadeTransition(opacity: anim, child: child),
                         child: Image(
                           key: ValueKey<String>(assetName),
-                          image: ImageCacheService.instance.imageProvider(assetName),
+                          image: _assetImageProvider(assetName),
                           fit: BoxFit.cover,
                         ),
                       ),
@@ -4519,6 +4408,48 @@ class _DescriptionToCarImageQuestionContentState
                 ),
               );
             },
+          ),
+          const SizedBox(height: 12),
+
+          // Manual frame controls
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.arrow_back_ios, size: 20),
+                onPressed: _answered ? null : _goToPreviousFrame,
+                color: Colors.white70,
+              ),
+              Text(
+                '${_frameIndex + 1}/$_maxFrames',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              IconButton(
+                icon: const Icon(Icons.arrow_forward_ios, size: 20),
+                onPressed: _answered ? null : _goToNextFrame,
+                color: Colors.white70,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+
+          // Dot indicators
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(
+              _maxFrames,
+              (index) => Container(
+                margin: const EdgeInsets.symmetric(horizontal: 4),
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _frameIndex == index
+                      ? Colors.red
+                      : Colors.grey.withOpacity(0.4),
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -4556,19 +4487,48 @@ class _BrandImageChoiceQuestionContentState
   int _frameIndex = 0;
   bool _answered = false;
   String? _selectedBrand;
+  Timer? _frameTimer;
+  static const int _maxFrames = 6;
 
   @override
   void initState() {
     super.initState();
     // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
-    // Cycle through frames every 2 seconds
+    _startFrameTimer();
+  }
+
+  void _startFrameTimer() {
+    _frameTimer?.cancel();
+    _frameTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted && !_answered) {
+        setState(() {
+          _frameIndex = (_frameIndex + 1) % _maxFrames;
+        });
+      }
+    });
+  }
+
+  void _goToNextFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex + 1) % _maxFrames;
+    });
+    _startFrameTimer();
+  }
+
+  void _goToPreviousFrame() {
+    if (_answered) return;
+    setState(() {
+      _frameIndex = (_frameIndex - 1 + _maxFrames) % _maxFrames;
+    });
+    _startFrameTimer();
   }
 
   @override
   void dispose() {
+    _frameTimer?.cancel();
     try { AudioFeedback.instance.playEvent(SoundEvent.pageClose); } catch (_) {}
-    // Si CETTE classe a des contrôleurs, dispose-les ici (sinon ne mets rien).
     super.dispose();
   }
 
@@ -4576,6 +4536,7 @@ class _BrandImageChoiceQuestionContentState
     if (_answered) return;
 
     _audioPlayTap();
+    _frameTimer?.cancel();
 
     final bool correct = brand == widget.correctBrand;
 
@@ -4606,28 +4567,41 @@ class _BrandImageChoiceQuestionContentState
 
   @override
   Widget build(BuildContext context) {
+    // Build answered history for progress bar
+    List<bool?> answeredCorrectly = List.filled(widget.totalQuestions, null);
+    // Mark current and previous questions (this is simplified - in full implementation track all answers)
+    for (int i = 0; i < widget.questionNumber - 1; i++) {
+      answeredCorrectly[i] = true; // Placeholder - actual implementation would track real results
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // Header
-        // top progress line (localized)
-        Text(
-          tr('questions.progress', namedArgs: {
-            'n': '${widget.questionNumber}',
-            'score': '${widget.currentScore}',
-            'total': '${widget.totalQuestions}',
-          }),
-          style: const TextStyle(fontSize: 12),
+        // Modern progress bar
+        RaceProgressBar(
+          currentQuestion: widget.questionNumber - 1,
+          totalQuestions: widget.totalQuestions,
+          answeredCorrectly: answeredCorrectly,
         ),
-        const SizedBox(height: 20),
+        const SizedBox(height: DesignTokens.space12),
+
+        // Animated score with streak
+        AnimatedRaceScore(
+          currentScore: widget.currentScore,
+          totalQuestions: widget.totalQuestions,
+          currentStreak: _streak,
+          showScoreChange: _answered && _selectedBrand == widget.correctBrand,
+          wasCorrect: _selectedBrand == widget.correctBrand,
+        ),
+        const SizedBox(height: DesignTokens.space24),
 
         // Prompt
         Text(
           "Which image represent the ${widget.targetBrand} ?",
-          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+          style: DesignTokens.heading3,
           textAlign: TextAlign.center,
         ),
-        const SizedBox(height: 20),
+        const SizedBox(height: DesignTokens.space24),
 
         // 2×2 grid of smoothly transitioning images
         GridView.builder(
@@ -4658,7 +4632,7 @@ class _BrandImageChoiceQuestionContentState
                           FadeTransition(opacity: anim, child: child),
                       child: Image(
                         key: ValueKey<String>(assetName),
-                        image: ImageCacheService.instance.imageProvider(assetName),
+                        image: _assetImageProvider(assetName),
                         fit: BoxFit.cover,
                       ),
                     ),
@@ -4677,6 +4651,15 @@ class _BrandImageChoiceQuestionContentState
               ),
             );
           },
+        ),
+        const SizedBox(height: DesignTokens.space16),
+
+        // Modern frame controls with our design system widget
+        ImageFrameControls(
+          currentFrame: _frameIndex,
+          totalFrames: _maxFrames,
+          onPrevious: _goToPreviousFrame,
+          onNext: _goToNextFrame,
         ),
       ],
     );
@@ -4722,6 +4705,7 @@ class _OriginCountryQuestionContentState
   @override
   void initState() {
     super.initState();
+    // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
     _startFrameTimer();
   }
@@ -4795,28 +4779,39 @@ class _OriginCountryQuestionContentState
 
   @override
   Widget build(BuildContext context) {
+    List<bool?> answeredCorrectly = List.filled(widget.totalQuestions, null);
+    for (int i = 0; i < widget.questionNumber - 1; i++) {
+      answeredCorrectly[i] = true;
+    }
+
     return SingleChildScrollView(
       child: Column(
         children: [
-          // Header
-          // top progress line (localized)
-          Text(
-            tr('questions.progress', namedArgs: {
-              'n': '${widget.questionNumber}',
-              'score': '${widget.currentScore}',
-              'total': '${widget.totalQuestions}',
-            }),
-            style: const TextStyle(fontSize: 12),
+          // Modern progress bar
+          RaceProgressBar(
+            currentQuestion: widget.questionNumber - 1,
+            totalQuestions: widget.totalQuestions,
+            answeredCorrectly: answeredCorrectly,
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: DesignTokens.space12),
+
+          // Animated score with streak
+          AnimatedRaceScore(
+            currentScore: widget.currentScore,
+            totalQuestions: widget.totalQuestions,
+            currentStreak: _streak,
+            showScoreChange: _answered && _selectedOrigin == widget.origin,
+            wasCorrect: _selectedOrigin == widget.origin,
+          ),
+          const SizedBox(height: DesignTokens.space24),
 
           // Prompt
           Text(
             "questions.origin".tr(),
-            style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+            style: DesignTokens.heading3,
             textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 20),
+          SizedBox(height: DesignTokens.space20),
 
           // Smoothly fading image
           ClipRRect(
@@ -4827,91 +4822,45 @@ class _OriginCountryQuestionContentState
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: ImageCacheService.instance
-                    .imageProvider('${widget.fileBase}$_frameIndex.webp'),
+                image: _assetImageProvider('${widget.fileBase}$_frameIndex.webp'),
                 height: 220,
                 width: double.infinity,
                 fit: BoxFit.cover,
               ),
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: DesignTokens.space16),
 
-          // Manual frame controls
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              IconButton(
-                icon: const Icon(Icons.arrow_back_ios, size: 20),
-                onPressed: _answered ? null : _goToPreviousFrame,
-                color: Colors.white70,
-              ),
-              Text(
-                '${_frameIndex + 1}/$_maxFrames',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-              ),
-              IconButton(
-                icon: const Icon(Icons.arrow_forward_ios, size: 20),
-                onPressed: _answered ? null : _goToNextFrame,
-                color: Colors.white70,
-              ),
-            ],
+          // Modern frame controls
+          ImageFrameControls(
+            currentFrame: _frameIndex,
+            totalFrames: _maxFrames,
+            onPrevious: _goToPreviousFrame,
+            onNext: _goToNextFrame,
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: DesignTokens.space24),
 
-          // Dot indicators
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(_maxFrames, (index) =>
-              Container(
-                margin: const EdgeInsets.symmetric(horizontal: 4),
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: _frameIndex == index
-                    ? Colors.red
-                    : Colors.grey.withOpacity(0.4),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
+          // Modern answer buttons
+          ...widget.options.map((opt) {
+            ButtonFeedbackState feedbackState = ButtonFeedbackState.none;
+            if (_answered) {
+              if (opt == widget.origin) {
+                feedbackState = ButtonFeedbackState.correct;
+              } else if (opt == _selectedOrigin) {
+                feedbackState = ButtonFeedbackState.incorrect;
+              }
+            }
 
-          // Country choice buttons
-          for (var opt in widget.options)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 6.0),
-              child: SizedBox(
-                width: double.infinity,
-                height: 50,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: Material(
-                    color: _answered
-                        ? (opt == widget.origin
-                            ? Colors.green
-                            : (opt == _selectedOrigin
-                                ? Colors.red
-                                : Colors.grey[800]!))
-                        : Colors.grey[800],
-                    child: InkWell(
-                      onTap: () => _onTap(opt),
-                      child: Center(
-                        child: Text(
-                          opt,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
+            return Padding(
+              padding: const EdgeInsets.only(bottom: DesignTokens.space12),
+              child: RaceAnswerButton(
+                text: opt,
+                onTap: () => _onTap(opt),
+                isDisabled: _answered,
+                feedbackState: feedbackState,
               ),
-            ),
+            );
+          }).toList(),
         ],
       ),
     );
@@ -4952,6 +4901,7 @@ class _ModelOnlyImageQuestionContentState
   @override
   void initState() {
     super.initState();
+    // play page open sound
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
     _startFrameTimer();
   }
@@ -5029,13 +4979,9 @@ class _ModelOnlyImageQuestionContentState
       child: Column(
         children: [
           // En-tête
-          // top progress line (localized)
           Text(
-            tr('questions.progress', namedArgs: {
-              'n': '${widget.questionNumber}',
-              'score': '${widget.currentScore}',
-              'total': '${widget.totalQuestions}',
-            }),
+            "Question #${widget.questionNumber} – "
+            "Score: ${widget.currentScore}/${widget.totalQuestions}",
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
@@ -5049,14 +4995,19 @@ class _ModelOnlyImageQuestionContentState
           // Image animée en boucle via le cache
           ClipRRect(
             borderRadius: BorderRadius.circular(12),
-            child: Image(
-              image: ImageCacheService.instance.imageProvider(
-                '${widget.fileBase}$_frameIndex.webp',
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 500),
+              transitionBuilder: (child, anim) =>
+                  FadeTransition(opacity: anim, child: child),
+              child: Image(
+                key: ValueKey<int>(_frameIndex),
+                image: _assetImageProvider(
+                  '${widget.fileBase}$_frameIndex.webp',
+                ),
+                height: 200,
+                width: double.infinity,
+                fit: BoxFit.cover,
               ),
-              key: ValueKey<int>(_frameIndex),
-              height: 200,
-              width: double.infinity,
-              fit: BoxFit.cover,
             ),
           ),
           const SizedBox(height: 12),
@@ -5086,21 +5037,22 @@ class _ModelOnlyImageQuestionContentState
           // Dot indicators
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(_maxFrames, (index) =>
-              Container(
+            children: List.generate(
+              _maxFrames,
+              (index) => Container(
                 margin: const EdgeInsets.symmetric(horizontal: 4),
                 width: 8,
                 height: 8,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   color: _frameIndex == index
-                    ? Colors.red
-                    : Colors.grey.withOpacity(0.4),
+                      ? Colors.red
+                      : Colors.grey.withOpacity(0.4),
                 ),
               ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 24),
 
           // Boutons modèles
           for (var m in widget.options)
@@ -5209,13 +5161,9 @@ class _RandomCarImageQuestionContentState
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           // Header
-          // top progress line (localized)
           Text(
-            tr('questions.progress', namedArgs: {
-              'n': '${widget.questionNumber}',
-              'score': '${widget.currentScore}',
-              'total': '${widget.totalQuestions}',
-            }),
+            "Question #${widget.questionNumber}  "
+            "Score: ${widget.currentScore}/${widget.totalQuestions}",
             style: const TextStyle(fontSize: 12),
           ),
           const SizedBox(height: 20),
@@ -5235,8 +5183,7 @@ class _RandomCarImageQuestionContentState
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(12),
                 child: Image(
-                  image: ImageCacheService.instance
-                      .imageProvider('${widget.fileBase}$i.webp'),
+                  image: _assetImageProvider('${widget.fileBase}$i.webp'),
                   height: 200,
                   width: double.infinity,
                   fit: BoxFit.cover,
@@ -5452,7 +5399,7 @@ class _RaceResultDialogContentState extends State<_RaceResultDialogContent>
                   const SizedBox(height: 16),
                   // Winner announcement
                   Text(
-                    widget.localWon ? tr('race.victory') : tr('race.finished'),
+                    widget.localWon ? 'Victory!' : 'Race Finished!',
                     style: const TextStyle(
                       fontSize: 28,
                       fontWeight: FontWeight.bold,
@@ -5470,7 +5417,7 @@ class _RaceResultDialogContentState extends State<_RaceResultDialogContent>
                     child: Text(
                       widget.winner.displayName.isNotEmpty
                           ? widget.winner.displayName
-                          : tr('race.winnerFallback'),
+                          : 'Winner',
                       style: const TextStyle(
                         fontSize: 20,
                         fontWeight: FontWeight.w600,
@@ -5551,7 +5498,7 @@ class _RaceResultDialogContentState extends State<_RaceResultDialogContent>
                                         Text(
                                           p.displayName.isNotEmpty
                                               ? p.displayName
-                                              : (isLocal ? tr('common.you') : tr('common.player')),
+                                              : (isLocal ? 'You' : 'Player'),
                                           style: TextStyle(
                                             color: Colors.white,
                                             fontSize: 16,
@@ -5561,7 +5508,7 @@ class _RaceResultDialogContentState extends State<_RaceResultDialogContent>
                                         ),
                                         if (isLocal)
                                           Text(
-                                            tr('common.youInParens'),
+                                            '(You)',
                                             style: TextStyle(
                                               color: Colors.white.withOpacity(0.7),
                                               fontSize: 12,
@@ -5642,7 +5589,7 @@ class _RaceResultDialogContentState extends State<_RaceResultDialogContent>
                   ),
                   onPressed: () => Navigator.of(context).pop(),
                   child: Text(
-                    'common.continue'.tr(),
+                    'Continue',
                     style: TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.bold,

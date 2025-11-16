@@ -190,7 +190,7 @@ class _PremiumPageState extends State<PremiumPage> with SingleTickerProviderStat
                           const SizedBox(width: 6),
                           Flexible(
                             child: Text(
-                              PremiumService.instance.isPremium ? 'Active' : 'Premium',
+                              PremiumService.instance.isPremium ? 'premium.active'.tr() : 'premium.title'.tr(),
                               style: const TextStyle(color: Colors.black87, fontWeight: FontWeight.bold),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
@@ -209,30 +209,56 @@ class _PremiumPageState extends State<PremiumPage> with SingleTickerProviderStat
     );
   }
 
-  Widget _buildFeatureRow(IconData icon, String title, String subtitle) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          decoration: BoxDecoration(
-            color: Colors.white10,
-            borderRadius: BorderRadius.circular(8),
-          ),
-          padding: const EdgeInsets.all(8),
-          child: Icon(icon, size: 20, color: Colors.white70),
+  Widget _buildFeatureRow(IconData icon, String title, String subtitle, Color accentColor) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: accentColor.withOpacity(0.3),
+          width: 1.5,
         ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
-              const SizedBox(height: 4),
-              Text(subtitle, style: const TextStyle(color: Colors.white70, fontSize: 13)),
-            ],
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            decoration: BoxDecoration(
+              color: accentColor.withOpacity(0.2),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            padding: const EdgeInsets.all(10),
+            child: Icon(icon, size: 24, color: accentColor),
           ),
-        ),
-      ],
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 17,
+                    letterSpacing: 0.3,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  subtitle,
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.8),
+                    fontSize: 14,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Icon(Icons.check_circle, color: accentColor, size: 20),
+        ],
+      ),
     );
   }
 
@@ -318,22 +344,22 @@ class _PremiumPageState extends State<PremiumPage> with SingleTickerProviderStat
                           children: [
                             Icon(isPremium ? Icons.favorite : Icons.favorite_border, color: isPremium ? Colors.amber : Colors.white70),
                             const SizedBox(width: 8),
-                            Text(isPremium ? 'Premium active' : 'Premium not purchased', style: theme.textTheme.titleLarge?.copyWith(fontSize: 16)),
+                            Text(isPremium ? 'premium.premiumActive'.tr() : 'premium.notPurchased'.tr(), style: theme.textTheme.titleLarge?.copyWith(fontSize: 16)),
                             const Spacer(),
                             // Small note
-                            Text(isPremium ? 'premium.thankYou'.tr() : 'One-time purchase', style: const TextStyle(color: Colors.white54)),
+                            Text(isPremium ? 'premium.thankYou'.tr() : 'premium.oneTimePurchase'.tr(), style: const TextStyle(color: Colors.white54)),
                           ],
                         ),
 
                         const SizedBox(height: 12),
 
                         // Features list
-                        _buildFeatureRow(Icons.favorite, 'premium.unlimitedLives'.tr(), 'premium.unlimitedLivesDesc'.tr()),
-                        const SizedBox(height: 12),
-                        _buildFeatureRow(Icons.block, 'premium.noAds'.tr(), 'premium.noAdsDesc'.tr()),
-                        const SizedBox(height: 12),
-                        _buildFeatureRow(Icons.fitness_center, 'premium.unlimitedTraining'.tr(), 'premium.unlimitedTrainingDesc'.tr()),
-                        const SizedBox(height: 16),
+                        _buildFeatureRow(Icons.favorite, 'premium.unlimitedLives'.tr(), 'premium.unlimitedLivesDesc'.tr(), Colors.red.shade400),
+                        const SizedBox(height: 14),
+                        _buildFeatureRow(Icons.block, 'premium.noAds'.tr(), 'premium.noAdsDesc'.tr(), Colors.blue.shade400),
+                        const SizedBox(height: 14),
+                        _buildFeatureRow(Icons.fitness_center, 'premium.unlimitedTraining'.tr(), 'premium.unlimitedTrainingDesc'.tr(), Colors.green.shade400),
+                        const SizedBox(height: 20),
 
                         // Price and CTA
                         _buildBuyArea(context),

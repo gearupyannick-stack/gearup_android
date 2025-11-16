@@ -236,7 +236,7 @@ class _ChallengeCompletionDialogState extends State<ChallengeCompletionDialog>
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  backgroundColor: Colors.blue,
+                  backgroundColor: const Color(0xFFE53935),
                 ),
                 child: Text(
                   'common.ok'.tr(),

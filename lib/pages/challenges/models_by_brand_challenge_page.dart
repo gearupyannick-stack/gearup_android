@@ -214,7 +214,7 @@ class _BrandModelQuizPageState extends State<BrandModelQuizPage> {
   int _elapsedSeconds = 0;
   int _frameIndex = 0;
   late Timer _quizTimer;
-  late Timer _frameTimer;
+  Timer? _frameTimer;
   static const int _maxFrames = 6;
   List<bool> _answerHistory = [];
 
@@ -237,7 +237,7 @@ class _BrandModelQuizPageState extends State<BrandModelQuizPage> {
   }
 
   void _startFrameTimer() {
-    _frameTimer.cancel();
+    _frameTimer?.cancel();
     _frameTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       if (!_answered) {
         setState(() => _frameIndex = (_frameIndex + 1) % _maxFrames);
@@ -264,11 +264,12 @@ class _BrandModelQuizPageState extends State<BrandModelQuizPage> {
   @override
   void dispose() {
     _quizTimer.cancel();
-    _frameTimer.cancel();
+    _frameTimer?.cancel();
     super.dispose();
   }
 
   void _nextQuestion() {
+    _frameTimer?.cancel();
     if (_questionCount >= _maxQuestions) {
       return _finishQuiz();
     }
@@ -296,7 +297,7 @@ class _BrandModelQuizPageState extends State<BrandModelQuizPage> {
 
   void _finishQuiz() {
     _quizTimer.cancel();
-    _frameTimer.cancel();
+    _frameTimer?.cancel();
     showDialog(
       context: context,
       barrierDismissible: false,
