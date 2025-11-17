@@ -164,11 +164,6 @@ class _AccelerationChallengePageState extends State<AccelerationChallengePage> {
   void _onTap(String accel) {
     if (_answered) return;
 
-    // play tap immediately (non-blocking)
-    try {
-      AudioFeedback.instance.playEvent(SoundEvent.tap);
-    } catch (_) {}
-
     final isCorrect = accel == _correctAcceleration;
     setState(() {
       _answered = true;

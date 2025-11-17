@@ -149,10 +149,15 @@ super.dispose();
   }
 
   void _onTap(String selection) {
-
-    try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
-if (_answered) return;
+    if (_answered) return;
     final isCorrect = selection == _correctPower;
+
+    // Play appropriate answer feedback sound
+    try {
+      AudioFeedback.instance.playEvent(
+        isCorrect ? SoundEvent.answerCorrect : SoundEvent.answerWrong
+      );
+    } catch (_) {}
     setState(() {
       _answered = true;
       _selectedPower = selection;

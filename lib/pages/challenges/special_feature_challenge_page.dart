@@ -153,10 +153,9 @@ super.dispose();
   }
 
   void _onTap(String feature) {
-
-    try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
-if (_answered) return;
+    if (_answered) return;
     final isCorrect = feature == _correctFeature;
+
     setState(() {
       _answered = true;
       _selectedFeature = feature;
@@ -183,12 +182,14 @@ if (_answered) return;
       }
     });
 
-    // audio: answer feedback
+    // Play appropriate answer feedback sound
     try {
-      if (_selectedFeature == _correctFeature) { AudioFeedback.instance.playEvent(SoundEvent.answerCorrect); } else { AudioFeedback.instance.playEvent(SoundEvent.answerWrong); }
-      try { if (true) { /* streak logic handled centrally if needed */ } } catch (_) {}
+      AudioFeedback.instance.playEvent(
+        isCorrect ? SoundEvent.answerCorrect : SoundEvent.answerWrong
+      );
     } catch (_) {}
-Future.delayed(const Duration(seconds: 1), _nextQuestion);
+
+    Future.delayed(const Duration(seconds: 1), _nextQuestion);
   }
 
   void _finishQuiz() {

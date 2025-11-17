@@ -151,10 +151,9 @@ super.dispose();
   }
 
   void _onTap(String selection) {
-
-    try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
-if (_answered) return;
+    if (_answered) return;
     final isCorrect = selection == _correctEngineType;
+
     setState(() {
       _answered = true;
       _selectedEngineType = selection;
@@ -181,12 +180,14 @@ if (_answered) return;
       }
     });
 
-    // audio: answer feedback
+    // Play appropriate answer feedback sound
     try {
-      if (_selectedEngineType == _correctEngineType) { AudioFeedback.instance.playEvent(SoundEvent.answerCorrect); } else { AudioFeedback.instance.playEvent(SoundEvent.answerWrong); }
-      try { if (true) { /* streak logic handled centrally if needed */ } } catch (_) {}
+      AudioFeedback.instance.playEvent(
+        isCorrect ? SoundEvent.answerCorrect : SoundEvent.answerWrong
+      );
     } catch (_) {}
-// wait 1s showing highlights, then advance
+
+    // wait 1s showing highlights, then advance
     Future.delayed(const Duration(seconds: 1), _nextQuestion);
   }
 
