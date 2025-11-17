@@ -1,7 +1,7 @@
 // android/app/build.gradle.kts
 
-val flutterVersionCode: String = "10"
-val flutterVersionName: String = "1.2025.3"
+val flutterVersionCode: String = "11"
+val flutterVersionName: String = "1.2025.4"
 
 plugins {
     id("com.android.application")
