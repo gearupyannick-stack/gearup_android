@@ -11,6 +11,7 @@ import '../../widgets/enhanced_answer_button.dart';
 import '../../widgets/question_progress_bar.dart';
 import '../../widgets/animated_score_display.dart';
 import '../../widgets/challenge_completion_dialog.dart';
+import '../../services/tutorial_service.dart';
 
 import '../../services/image_service_cache.dart'; // ← Utilisation du cache local
 
@@ -221,8 +222,15 @@ class _BrandChallengePageState extends State<BrandChallengePage> {
         correctAnswers: correctAnswers,
         totalQuestions: 20,
         totalSeconds: elapsedSeconds,
-        onClose: () {
+        onClose: () async {
           Navigator.of(ctx).pop();
+          final tutorialService = TutorialService.instance;
+          final bool started = await tutorialService.isFirstFlagStarted();
+          if (started) {
+            await tutorialService.advanceToTabsStage();
+            await tutorialService.setFirstFlagStarted(false);
+            await tutorialService.resetTabIntros();
+          }
           Navigator.pop(
             context,
             '$correctAnswers/20 in ${elapsedSeconds ~/ 60}\'${(elapsedSeconds % 60).toString().padLeft(2, '0')}\'\'',

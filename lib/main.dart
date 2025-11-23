@@ -4,21 +4,21 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:easy_localization/easy_localization.dart';
-import 'services/premium_service.dart';
-import 'services/ad_service.dart';
-import 'pages/premium_page.dart';
 
 // REMOVED: import 'pages/welcome_page.dart';
 import 'pages/home_page.dart';
+import 'pages/training_page.dart';
 import 'pages/library_page.dart';
 import 'pages/profile_page.dart';
-import 'pages/preload_page.dart'; // ✅ first-launch data loader
 import 'pages/welcome_page.dart';
 import 'services/sound_manager.dart';
-import 'pages/training_page.dart';
-
+import 'services/premium_service.dart';
+import 'services/ad_service.dart';
+import 'pages/premium_page.dart';
+import 'services/auth_service.dart';
 import 'services/lives_storage.dart';
+import 'services/language_service.dart';
+import 'services/tutorial_service.dart';
 import 'package:tutorial_coach_mark/tutorial_coach_mark.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'services/firebase_options.dart';
@@ -26,16 +26,73 @@ import 'package:url_launcher/url_launcher.dart';
 import 'pages/race_page.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'services/auth_service.dart';
 import 'services/analytics_service.dart';
-import 'services/language_service.dart';
+import 'package:easy_localization/easy_localization.dart';
+import 'widgets/tutorial_overlay.dart';
 
 final GlobalKey<ScaffoldMessengerState> scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
+
+/// Track app launch and update user properties in Analytics
+Future<void> _trackAppLaunch(SharedPreferences prefs) async {
+  try {
+    // Log app open
+    await AnalyticsService.instance.logAppOpen();
+
+    // Check if this is first app open
+    final isFirstOpen = !(prefs.getBool('isOnboarded') ?? false);
+    if (isFirstOpen) {
+      await AnalyticsService.instance.logFirstOpen();
+    }
+
+    // Set user ID from Firebase Auth
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser != null) {
+      await AnalyticsService.instance.setUserId(currentUser.uid);
+    }
+
+    // Update user properties
+    final isPremium = prefs.getBool('isPremium') ?? false;
+    final gearCount = prefs.getInt('gearCount') ?? 0;
+    final dayStreak = prefs.getInt('dayStreak') ?? 0;
+
+    // Determine auth method for iOS
+    String authMethod = 'anonymous';
+    if (currentUser != null && !currentUser.isAnonymous) {
+      // Check provider data to determine if it's Apple Sign-In
+      final providerData = currentUser.providerData;
+      if (providerData.any((info) => info.providerId == 'apple.com')) {
+        authMethod = 'apple';
+      }
+    }
+
+    // Determine user type
+    String userType = 'free';
+    if (isPremium) {
+      userType = 'premium';
+    } else if (currentUser?.isAnonymous ?? false) {
+      userType = 'guest';
+    }
+
+    // Update all user properties
+    await AnalyticsService.instance.updateUserProperties(
+      userType: userType,
+      totalGears: gearCount,
+      currentTrack: 1, // Default, will be updated as user progresses
+      currentLevel: 1, // Default, will be updated as user progresses
+      dayStreak: dayStreak,
+      authMethod: authMethod,
+    );
+
+    debugPrint('Analytics: App launch tracked successfully');
+  } catch (e) {
+    debugPrint('Analytics: Error tracking app launch: $e');
+    // Don't block app startup if analytics fails
+  }
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialize EasyLocalization
   await EasyLocalization.ensureInitialized();
 
   // Force system UI to use dark theme (status bar, navigation bar)
@@ -89,13 +146,10 @@ void main() async {
     debugPrint('AppCheck activation error: $e\n$st');
   }
 
-  // Sync Firebase Auth state with SharedPreferences
-  await _syncFirebaseAuthState();
-
-  final prefs = await SharedPreferences.getInstance();
-
   // Track app open and set user properties
+  final prefs = await SharedPreferences.getInstance();
   await _trackAppLaunch(prefs);
+  await TutorialService.instance.init();
   final bool areImagesLoaded = prefs.getBool('areImagesLoaded') ?? false;
   final bool shouldPreload = !areImagesLoaded;
 
@@ -108,14 +162,7 @@ void main() async {
 
   runApp(
     EasyLocalization(
-      supportedLocales: const [
-        Locale('en'),
-        Locale('es'),
-        Locale('fr'),
-        Locale('de'),
-        Locale('it'),
-        Locale('pt'),
-      ],
+      supportedLocales: const [Locale('en'), Locale('es'), Locale('fr'), Locale('de'), Locale('it'), Locale('pt')],
       path: 'assets/translations',
       fallbackLocale: const Locale('en'),
       startLocale: startLocale, // Override device locale if user has set preference
@@ -126,118 +173,6 @@ void main() async {
       ),
     ),
   );
-}
-
-/// Syncs Firebase Auth state with SharedPreferences on app startup
-/// Migrates existing guest users to anonymous Firebase auth
-Future<void> _syncFirebaseAuthState() async {
-  try {
-    final prefs = await SharedPreferences.getInstance();
-    final currentUser = FirebaseAuth.instance.currentUser;
-
-    if (currentUser != null) {
-      // User is already authenticated in Firebase
-      debugPrint('Firebase Auth: User already signed in: ${currentUser.uid}');
-
-      // Sync SharedPreferences with Firebase state
-      final storedUid = prefs.getString('firebase_uid');
-      if (storedUid != currentUser.uid) {
-        // Update stored UID to match Firebase
-        await prefs.setString('firebase_uid', currentUser.uid);
-        debugPrint('Firebase Auth: Synced UID to SharedPreferences');
-      }
-
-      // Ensure auth_method is set correctly
-      if (currentUser.isAnonymous) {
-        await prefs.setBool('is_guest', true);
-        await prefs.setString('auth_method', 'anonymous');
-      } else {
-        // User is authenticated with Google
-        await prefs.setBool('is_guest', false);
-        await prefs.setString('auth_method', 'google');
-        await prefs.setBool('google_signed_in', true);
-      }
-    } else {
-      // No Firebase user exists
-      debugPrint('Firebase Auth: No user signed in');
-
-      // Check if user has local progress but no Firebase auth (existing guest user)
-      final isOnboarded = prefs.getBool('isOnboarded') ?? false;
-      final isGuest = prefs.getBool('is_guest') ?? false;
-      final gearCount = prefs.getInt('gearCount') ?? 0;
-
-      if (isOnboarded && (isGuest || gearCount > 0)) {
-        // Existing user without Firebase auth - migrate to anonymous
-        debugPrint('Firebase Auth: Migrating existing guest user to anonymous auth');
-        try {
-          final credential = await AuthService.instance.signInAnonymously();
-          if (credential != null && credential.user != null) {
-            await prefs.setBool('is_guest', true);
-            await prefs.setString('auth_method', 'anonymous');
-            await prefs.setString('firebase_uid', credential.user!.uid);
-            await prefs.setString('anonymous_since', DateTime.now().toIso8601String());
-            debugPrint('Firebase Auth: Successfully migrated guest to anonymous: ${credential.user!.uid}');
-          }
-        } catch (e) {
-          debugPrint('Firebase Auth: Failed to migrate guest user: $e');
-          // Continue anyway - user can still use the app
-        }
-      }
-    }
-  } catch (e, stack) {
-    debugPrint('Firebase Auth sync error: $e\n$stack');
-    // Don't block app startup if auth sync fails
-  }
-}
-
-/// Track app launch and update user properties in Analytics
-Future<void> _trackAppLaunch(SharedPreferences prefs) async {
-  try {
-    // Log app open
-    await AnalyticsService.instance.logAppOpen();
-
-    // Check if this is first app open
-    final isFirstOpen = !(prefs.getBool('isOnboarded') ?? false);
-    if (isFirstOpen) {
-      await AnalyticsService.instance.logFirstOpen();
-    }
-
-    // Set user ID from Firebase Auth
-    final firebaseUid = prefs.getString('firebase_uid');
-    if (firebaseUid != null) {
-      await AnalyticsService.instance.setUserId(firebaseUid);
-    }
-
-    // Update user properties
-    final isPremium = prefs.getBool('isPremium') ?? false;
-    final isGuest = prefs.getBool('is_guest') ?? false;
-    final authMethod = prefs.getString('auth_method') ?? 'unknown';
-    final gearCount = prefs.getInt('gearCount') ?? 0;
-    final dayStreak = prefs.getInt('dayStreak') ?? 0;
-
-    // Determine user type
-    String userType = 'free';
-    if (isPremium) {
-      userType = 'premium';
-    } else if (isGuest) {
-      userType = 'guest';
-    }
-
-    // Update all user properties
-    await AnalyticsService.instance.updateUserProperties(
-      userType: userType,
-      totalGears: gearCount,
-      currentTrack: 1, // Default, will be updated as user progresses
-      currentLevel: 1, // Default, will be updated as user progresses
-      dayStreak: dayStreak,
-      authMethod: authMethod,
-    );
-
-    debugPrint('Analytics: App launch tracked successfully');
-  } catch (e) {
-    debugPrint('Analytics: Error tracking app launch: $e');
-    // Don't block app startup if analytics fails
-  }
 }
 
 class CarLearningApp extends StatelessWidget {
@@ -252,15 +187,35 @@ class CarLearningApp extends StatelessWidget {
     required this.livesStorage,
   }) : super(key: key);
 
+  Future<bool> _initializeApp() async {
+    final prefs = await SharedPreferences.getInstance();
+    final onboarded = prefs.getBool('isOnboarded') ?? false;
+    
+    // Auto-authenticate returning users silently in background
+    if (onboarded) {
+      try {
+        final auth = AuthService.instance;
+        if (auth.currentUser == null) {
+          await auth.signInAnonymously();
+        }
+      } catch (e) {
+        debugPrint('Background auth failed: $e');
+      }
+    }
+    
+    return onboarded;
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'app.title'.tr(),
       debugShowCheckedModeBanner: false,
       scaffoldMessengerKey: scaffoldMessengerKey,
-      localizationsDelegates: context.localizationDelegates,
-      supportedLocales: context.supportedLocales,
-      locale: context.locale,
+      routes: {'/premium': (ctx)=>const PremiumPage()},
+      localizationsDelegates: EasyLocalization.of(context)!.delegates,
+      supportedLocales: EasyLocalization.of(context)!.supportedLocales,
+      locale: EasyLocalization.of(context)!.currentLocale,
       theme: ThemeData(
         brightness: Brightness.dark,
         scaffoldBackgroundColor: const Color(0xFF121212),
@@ -319,8 +274,7 @@ class CarLearningApp extends StatelessWidget {
       ),
 
       home: FutureBuilder<bool>(
-        future: SharedPreferences.getInstance()
-            .then((p) => p.getBool('isOnboarded') ?? false),
+        future: _initializeApp(),
         builder: (context, snap) {
           if (!snap.hasData) {
             return const Scaffold(
@@ -329,19 +283,12 @@ class CarLearningApp extends StatelessWidget {
           }
           final onboarded = snap.data!;
           if (!onboarded) {
-            // ✅ First launch: show WelcomePage (your buttons handle setting isOnboarded=true)
             return const WelcomePage();
           }
-          // ✅ After onboarding: keep your existing preload vs. main logic
-          return shouldPreload
-              ? PreloadPage(
-                  initialLives: initialLives,
-                  livesStorage: livesStorage,
-                )
-              : MainPage(
-                  initialLives: initialLives,
-                  livesStorage: livesStorage,
-                );
+          return MainPage(
+            initialLives: initialLives,
+            livesStorage: livesStorage,
+          );
         },
       ),
     );
@@ -368,15 +315,9 @@ class _FirstLaunchGateState extends State<FirstLaunchGate> {
   @override
   void initState() {
     super.initState();
-
-    // Initialise l'état premium depuis SharedPreferences
-    // (charge isPremium et compte quotidien). On refresh l'UI après init.
-    PremiumService.instance.init().then((_) {
-      if (mounted) setState(() {});
-    });
-
-    // garde le comportement existant qui affiche PreloadPage la première fois
-    _markNotFirstAndShowPreload();
+    // Initialize Premium state
+    PremiumService.instance.init().then((_) { if(mounted) setState((){}); });
+_markNotFirstAndShowPreload();
   }
 
   Future<void> _markNotFirstAndShowPreload() async {
@@ -401,7 +342,7 @@ class _FirstLaunchGateState extends State<FirstLaunchGate> {
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
-          builder: (_) => PreloadPage(
+          builder: (_) => MainPage(
             initialLives: widget.initialLives,
             livesStorage: widget.livesStorage,
           ),
@@ -440,27 +381,46 @@ class _MainPageState extends State<MainPage> {
 
   // ── CONFIG ─────────────────────────────────────────
   static const int _maxLives = 5;
-  static const int _refillInterval = 900; // seconds per life
+  static const int _refillInterval = 600; // seconds per life
 
-  // ── STATE ──────────────────────────────────────────
   int _currentIndex = 0;
   int gearCount = 0;
   late int lives;
   Timer? _lifeTimer;
   bool _hasShownRatePopup = false;
-  final ValueNotifier<int> _lifeTimerRemaining = ValueNotifier<int>(0);
   bool _isShowingAdAction = false;
+  final ValueNotifier<int> _lifeTimerRemaining = ValueNotifier<int>(0);
+
+  // Tutorial interaction flags
+  bool _tutorialWaitingForCategoryPopup = false;
+  bool _tutorialWaitingForCalendarPopup = false;
+  bool _tutorialWaitingForLivesPopup    = false;
+  int _tutorialCurrentStartIndex = 0;
+  static const List<String> _tutorialTargetOrder = [
+    "Gear",
+    "Streak",
+    "Lives",
+    "LevelProgress",
+    "FirstFlag",
+  ];
+  int _tutorialStage = TutorialStage.notStarted;
+  bool _isTabsTutorialActive = false;
+
+  // Tabs tutorial state
+  int _currentTabTutorialStep = 0; // 0=training, 1=race, 2=library, 3=profile
+  bool _showTabTutorialOverlay = false;
+  String? _tabTutorialOverlayText;
 
   // ── KEYS & PAGES ───────────────────────────────────
-  final GlobalKey _gearKey        = GlobalKey();
-  final GlobalKey _streakKey      = GlobalKey();
-  final GlobalKey _livesKey       = GlobalKey();
-  final GlobalKey _firstFlagKey   = GlobalKey();
-  final GlobalKey _tabHomeKey     = GlobalKey();
-  final GlobalKey _tabTrainingKey = GlobalKey();
-  final GlobalKey _tabRaceKey     = GlobalKey(); 
-  final GlobalKey _tabLibraryKey  = GlobalKey();
-  final GlobalKey _tabProfileKey  = GlobalKey();
+  final GlobalKey _gearKey          = GlobalKey();
+  final GlobalKey _streakKey        = GlobalKey();
+  final GlobalKey _livesKey         = GlobalKey();
+  final GlobalKey _firstFlagKey     = GlobalKey();
+  final GlobalKey _tabHomeKey       = GlobalKey();
+  final GlobalKey _tabTrainingKey   = GlobalKey();
+  final GlobalKey _tabRaceKey       = GlobalKey(); 
+  final GlobalKey _tabLibraryKey    = GlobalKey();
+  final GlobalKey _tabProfileKey    = GlobalKey();
   final GlobalKey _levelProgressKey = GlobalKey();
   final List<Widget> _pages = [];
 
@@ -489,23 +449,17 @@ class _MainPageState extends State<MainPage> {
         recordChallengeCompletion: recordChallengeCompletion,
         firstFlagKey: _firstFlagKey,
         levelProgressKey: _levelProgressKey,
-        onLivesChanged: (newLives) {
-          // update the central lives value in MainPage immediately
-          setState(() => lives = newLives);
-        },
       ),
       TrainingPage(
         onLifeWon: () async {
-          try {
-            await _applyGrantedLife();
-          } catch (e) {
-            debugPrint('onLifeWon -> _applyGrantedLife failed: $e');
-            // fallback read & refresh
-            try {
-              final int newLives = await widget.livesStorage.readLives();
-              if (mounted) setState(() => lives = newLives);
-            } catch (_) {}
-          }
+          int newLives = await widget.livesStorage.readLives();
+          setState(() => lives = newLives);
+
+          // Track life earned from training
+          AnalyticsService.instance.logLifeEarned(
+            source: 'training',
+            livesNow: newLives,
+          );
         },
         recordChallengeCompletion: recordChallengeCompletion,
       ),
@@ -516,82 +470,7 @@ class _MainPageState extends State<MainPage> {
     // 4) other inits
     _loadDayStreak();
     _initializeChallengeStatus();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _maybeShowTutorial();
-      _maybeShowAnonymousUpgradePrompt();
-    });
-  }
-
-  /// Apply a granted life: persist, update UI and timers.
-  Future<void> _applyGrantedLife() async {
-    final prefs = await SharedPreferences.getInstance();
-
-    // update lives (clamped to _maxLives)
-    setState(() {
-      lives = (lives + 1).clamp(0, _maxLives);
-    });
-
-    // Track life earned
-    AnalyticsService.instance.logLifeEarned(
-      source: 'training', // Default source, can be overridden by caller
-      livesNow: lives,
-    );
-
-    // persist via LivesStorage
-    await widget.livesStorage.writeLives(lives);
-
-    // if we're now full, cancel timer and remove nextDue
-    if (lives >= _maxLives) {
-      prefs.remove('nextLifeDueTime');
-      _lifeTimer?.cancel();
-      _lifeTimer = null;
-      _lifeTimerRemaining.value = 0;
-    } else {
-      // schedule next due from now
-      final nextDue = DateTime.now().add(const Duration(seconds: _refillInterval));
-      await prefs.setString('nextLifeDueTime', nextDue.toIso8601String());
-      _lifeTimerRemaining.value = nextDue.difference(DateTime.now()).inSeconds;
-      if (_lifeTimer == null) _startLifeTimer();
-    }
-
-    // immediate feedback
-    scaffoldMessengerKey.currentState?.showSnackBar(
-      SnackBar(content: Text('lives.earnedOne'.tr())),
-    );
-  }
-
-  Future<void> _onWatchAdForLife() async {
-    if (_isShowingAdAction) return;
-    setState(() => _isShowingAdAction = true);
-
-    scaffoldMessengerKey.currentState?.showSnackBar(SnackBar(content: Text('lives.loadingAd'.tr())));
-
-    try {
-      // AdService should call the provided onEarnedLife callback synchronously
-      final shown = await AdService.instance.showRewardedHomeLife(
-        onEarnedLife: () {
-          // call async apply helper (don't await here; it updates state itself)
-          _applyGrantedLife();
-        },
-      );
-
-      scaffoldMessengerKey.currentState?.clearSnackBars();
-
-      if (!shown) {
-        scaffoldMessengerKey.currentState?.showSnackBar(
-          SnackBar(content: Text('lives.adUnavailable'.tr())),
-        );
-      }
-      // if shown==true, the onEarnedLife callback will have run and persisted new lives.
-    } catch (e) {
-      scaffoldMessengerKey.currentState?.clearSnackBars();
-      scaffoldMessengerKey.currentState?.showSnackBar(
-        SnackBar(content: Text('lives.adError'.tr(namedArgs: {'error': e.toString()}))),
-      );
-      debugPrint('Error in _onWatchAdForLife: $e');
-    } finally {
-      if (mounted) setState(() => _isShowingAdAction = false);
-    }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowTutorial());
   }
 
   /// Uses the stored clock to refill lives & compute remaining time.
@@ -685,22 +564,21 @@ class _MainPageState extends State<MainPage> {
   }
 
   /// On challenge failure: decrement, persist, start timer if needed,
-  /// then show the 5-star popup if it's the first time at zero.
+  /// then show the 5-star popup if it’s the first time at zero.
   /// Called whenever the user fails a challenge.
   Future<void> _onChallengeFail() async {
-    // 1) Decrement & persist
-    setState(() {
-      if (lives > 0) lives--;
-    });
-    await widget.livesStorage.writeLives(lives);
+    // 1) Decrement & persist (skip if Premium)
+    if (!PremiumService.instance.isPremium) {
+      setState(() { if (lives > 0) lives--; });
+      await widget.livesStorage.writeLives(lives);
 
-    // Track life lost
-    AnalyticsService.instance.logLifeLost(
-      context: 'challenge_fail',
-      livesRemaining: lives,
-    );
-
-    // 2) If we’ve dropped below max, schedule the next life *relative to now*
+      // Track life lost
+      AnalyticsService.instance.logLifeLost(
+        context: 'challenge_fail',
+        livesRemaining: lives,
+      );
+    }
+// 2) If we’ve dropped below max, schedule the next life *relative to now*
     if (lives < _maxLives) {
       final prefs = await SharedPreferences.getInstance();
       final nextDue = DateTime.now().add(const Duration(seconds: _refillInterval));
@@ -775,170 +653,107 @@ class _MainPageState extends State<MainPage> {
     }
   }
 
-  Future<void> _maybeShowTutorial({bool force = false}) async {
-    // Show the tutorial only when:
-    //  - force == true  (replay request from profile), OR
-    //  - there is no 'hasSeenTutorial' flag in SharedPreferences yet.
-    //
-    // When we decide to show it, we immediately set the flag to true so it
-    // won't reappear on subsequent app launches.
+  /// Watch ad to recover a life
+  Future<void> _onWatchAdForLife() async {
+    if (_isShowingAdAction) return;
+    setState(() => _isShowingAdAction = true);
 
-    final prefs = await SharedPreferences.getInstance();
-    final bool hasSeen = prefs.getBool('hasSeenTutorial') ?? false;
+    scaffoldMessengerKey.currentState?.showSnackBar(SnackBar(content: Text('lives.loadingAd'.tr())));
+
+    try {
+      // AdService should call the provided onEarnedLife callback synchronously
+      final shown = await AdService.instance.showRewardedHomeLife(
+        onEarnedLife: () {
+          // Grant 1 life
+          setState(() {
+            lives = (lives + 1).clamp(0, _maxLives);
+          });
+          widget.livesStorage.writeLives(lives);
+
+          scaffoldMessengerKey.currentState?.showSnackBar(
+            SnackBar(content: Text('lives.earnedOne'.tr())),
+          );
+        },
+      );
+
+      scaffoldMessengerKey.currentState?.clearSnackBars();
+
+      if (!shown) {
+        scaffoldMessengerKey.currentState?.showSnackBar(
+          SnackBar(content: Text('lives.adUnavailable'.tr())),
+        );
+      }
+      // if shown==true, the onEarnedLife callback will have run and persisted new lives.
+    } catch (e) {
+      scaffoldMessengerKey.currentState?.clearSnackBars();
+      scaffoldMessengerKey.currentState?.showSnackBar(
+        SnackBar(content: Text('lives.adError'.tr(namedArgs: {'error': e.toString()}))),
+      );
+      debugPrint('Error in _onWatchAdForLife: $e');
+    } finally {
+      if (mounted) setState(() => _isShowingAdAction = false);
+    }
+  }
+
+  Future<void> _updateTutorialStage(int stage) async {
+    await TutorialService.instance.setTutorialStage(stage);
+    if (mounted) {
+      setState(() => _tutorialStage = stage);
+    } else {
+      _tutorialStage = stage;
+    }
+  }
+
+  void _hideTutorialOverlay() {
+    _tutorialCoachMark?.removeOverlayEntry();
+    _tutorialCoachMark = null;
+  }
+
+  void _resumeTutorialFrom(int nextIndex) {
+    if (_tutorialStage != TutorialStage.topRow) return;
+    if (nextIndex >= _tutorialTargetOrder.length) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _showTutorial(startIndex: nextIndex));
+  }
+
+  Future<void> _maybeShowTutorial({bool force = false}) async {
+    final tutorialService = TutorialService.instance;
 
     if (force) {
-      // Replay requested from profile: always show, and persist that user has seen it.
-      await prefs.setBool('hasSeenTutorial', true);
-      // Track tutorial replay
       AnalyticsService.instance.logTutorialReplayed();
+      await tutorialService.resetTutorial();
+    }
+
+    final int stage = await tutorialService.getTutorialStage();
+    if (mounted) {
+      setState(() => _tutorialStage = stage);
+    } else {
+      _tutorialStage = stage;
+    }
+
+    if (stage == TutorialStage.notStarted) {
+      AnalyticsService.instance.logTutorialBegin();
+      await _updateTutorialStage(TutorialStage.topRow);
       WidgetsBinding.instance.addPostFrameCallback((_) => _showTutorial());
       return;
     }
 
-    // Normal behaviour: if not seen before, mark seen and show once.
-    if (!hasSeen) {
-      await prefs.setBool('hasSeenTutorial', true);
-      // Track tutorial begin
-      AnalyticsService.instance.logTutorialBegin();
+    if (stage == TutorialStage.topRow) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _showTutorial());
+      return;
+    }
+
+    if (stage == TutorialStage.tabsReady) {
+      unawaited(_maybeStartTabsTutorial());
+      return;
     }
   }
 
-  /// Shows a prompt to anonymous users after 2 days to connect their Google account
-  Future<void> _maybeShowAnonymousUpgradePrompt() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-
-      // Check if user is anonymous
-      final authMethod = prefs.getString('auth_method');
-      if (authMethod != 'anonymous') {
-        return; // Not anonymous, skip
-      }
-
-      // Check if already prompted
-      final hasBeenPrompted = prefs.getBool('anonymous_upgrade_prompted') ?? false;
-      if (hasBeenPrompted) {
-        return; // Already prompted, don't show again
-      }
-
-      // Check when user became anonymous
-      final anonymousSinceStr = prefs.getString('anonymous_since');
-      if (anonymousSinceStr == null) {
-        return; // No timestamp, skip
-      }
-
-      final anonymousSince = DateTime.parse(anonymousSinceStr);
-      final now = DateTime.now();
-      final daysSinceAnonymous = now.difference(anonymousSince).inDays;
-
-      // Show prompt after 2 days
-      if (daysSinceAnonymous >= 2) {
-        // Mark as prompted so we don't show again
-        await prefs.setBool('anonymous_upgrade_prompted', true);
-
-        // Show the prompt after a short delay to not interfere with tutorial
-        Future.delayed(const Duration(seconds: 2), () {
-          if (!mounted) return;
-          _showAnonymousUpgradeDialog();
-        });
-      }
-    } catch (e) {
-      debugPrint('Error checking anonymous upgrade prompt: $e');
-    }
-  }
-
-  /// Shows a dialog prompting anonymous users to connect their Google account
-  void _showAnonymousUpgradeDialog() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Row(
-          children: [
-            const Icon(Icons.cloud_upload, color: Colors.blue, size: 28),
-            const SizedBox(width: 12),
-            Expanded(child: Text('anonymousUpgrade.title'.tr())),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'anonymousUpgrade.message'.tr(),
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              'anonymousUpgrade.connectTo'.tr(),
-              style: const TextStyle(fontSize: 14),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                const Icon(Icons.check_circle, color: Colors.green, size: 20),
-                const SizedBox(width: 8),
-                Expanded(child: Text('anonymousUpgrade.neverLose'.tr())),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Row(
-              children: [
-                const Icon(Icons.check_circle, color: Colors.green, size: 20),
-                const SizedBox(width: 8),
-                Expanded(child: Text('anonymousUpgrade.accessAny'.tr())),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Row(
-              children: [
-                const Icon(Icons.check_circle, color: Colors.green, size: 20),
-                const SizedBox(width: 8),
-                Expanded(child: Text('anonymousUpgrade.syncAchievements'.tr())),
-              ],
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: Text('anonymousUpgrade.maybeLater'.tr()),
-          ),
-          ElevatedButton.icon(
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              // Navigate to profile page where they can connect
-              setState(() {
-                _currentIndex = 4; // Profile tab
-              });
-              // Show a snackbar to guide them
-              Future.delayed(const Duration(milliseconds: 500), () {
-                scaffoldMessengerKey.currentState?.showSnackBar(
-                  SnackBar(
-                    content: Text('anonymousUpgrade.guideMessage'.tr()),
-                    duration: const Duration(seconds: 4),
-                  ),
-                );
-              });
-            },
-            icon: const Icon(Icons.link),
-            label: Text('anonymousUpgrade.connectNow'.tr()),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF4285F4),
-              foregroundColor: Colors.white,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showTutorial() {
+  void _showTutorial({int startIndex = 0}) {
+    _tutorialCurrentStartIndex = startIndex;
     // screen dimensions for centering text
     final size = MediaQuery.of(context).size;
     final middleTop = size.height * 0.5 - 50;
     final sidePadding = size.width * 0.1;
-    // you already changed this value — keep it
-    final skipYOffset = (50 / size.height) * 15.0; // Alignment y goes from -1 to 1
 
     // local reference to the coach mark so our Continue buttons can call next()/finish()
     // use the field instead of a local variable
@@ -951,7 +766,7 @@ class _MainPageState extends State<MainPage> {
       fontWeight: FontWeight.w500,
     );
 
-    final targets = <TargetFocus>[
+    final allTargets = <TargetFocus>[
       // 1) Gear
       TargetFocus(
         identify: "Gear",
@@ -973,20 +788,6 @@ class _MainPageState extends State<MainPage> {
                   style: tutorialTextStyle,
                 ),
                 const SizedBox(height: 16),
-                ElevatedButton(
-                  onPressed: () => _tutorialCoachMark?.next(),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.black,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("tutorial.continue".tr()),
-                  ),
-                ),
               ],
             ),
           ),
@@ -1014,20 +815,6 @@ class _MainPageState extends State<MainPage> {
                   style: tutorialTextStyle,
                 ),
                 const SizedBox(height: 16),
-                ElevatedButton(
-                  onPressed: () => _tutorialCoachMark?.next(),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.black,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("tutorial.continue".tr()),
-                  ),
-                ),
               ],
             ),
           ),
@@ -1055,20 +842,6 @@ class _MainPageState extends State<MainPage> {
                   style: tutorialTextStyle,
                 ),
                 const SizedBox(height: 16),
-                ElevatedButton(
-                  onPressed: () => _tutorialCoachMark?.next(),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.black,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("tutorial.continue".tr()),
-                  ),
-                ),
               ],
             ),
           ),
@@ -1102,239 +875,13 @@ class _MainPageState extends State<MainPage> {
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: Colors.white70, fontSize: 14),
                 ),
-                const SizedBox(height: 16),
-                ElevatedButton(
-                  onPressed: () => _tutorialCoachMark?.next(),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.black,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("tutorial.continue".tr()),
-                  ),
-                ),
               ],
             ),
           ),
         ],
       ),
 
-      // 5) Home tab
-      TargetFocus(
-        identify: "HomeTab",
-        keyTarget: _tabHomeKey,
-        contents: [
-          TargetContent(
-            align: ContentAlign.custom,
-            customPosition: CustomTargetContentPosition(
-              top: middleTop,
-              left: sidePadding,
-              right: sidePadding,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  "tutorial.homeTab".tr(),
-                  textAlign: TextAlign.center,
-                  style: tutorialTextStyle,
-                ),
-                const SizedBox(height: 16),
-                ElevatedButton(
-                  onPressed: () => _tutorialCoachMark?.next(),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.black,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("tutorial.continue".tr()),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-
-      // 6) Training tab
-      TargetFocus(
-        identify: "TrainingTab",
-        keyTarget: _tabTrainingKey,
-        contents: [
-          TargetContent(
-            align: ContentAlign.custom,
-            customPosition: CustomTargetContentPosition(
-              top: middleTop,
-              left: sidePadding,
-              right: sidePadding,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  "tutorial.trainingTab".tr(),
-                  textAlign: TextAlign.center,
-                  style: tutorialTextStyle,
-                ),
-                const SizedBox(height: 16),
-                ElevatedButton(
-                  onPressed: () => _tutorialCoachMark?.next(),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.black,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("tutorial.continue".tr()),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-
-      // Multiplayer / Race (NEW)
-      TargetFocus(
-        identify: "Multiplayer",
-        keyTarget: _tabRaceKey, // reuses existing Race tab key
-        contents: [
-          TargetContent(
-            align: ContentAlign.custom,
-            customPosition: CustomTargetContentPosition(
-              top: middleTop,
-              left: sidePadding,
-              right: sidePadding,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  "tutorial.multiplayer".tr(),
-                  textAlign: TextAlign.center,
-                  style: tutorialTextStyle,
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  "tutorial.multiplayerTip".tr(),
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white70, fontSize: 14),
-                ),
-                const SizedBox(height: 16),
-                ElevatedButton(
-                  onPressed: () => _tutorialCoachMark?.next(),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.black,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("tutorial.continue".tr()),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-
-      // 7) Library tab
-      TargetFocus(
-        identify: "LibraryTab",
-        keyTarget: _tabLibraryKey,
-        contents: [
-          TargetContent(
-            align: ContentAlign.custom,
-            customPosition: CustomTargetContentPosition(
-              top: middleTop,
-              left: sidePadding,
-              right: sidePadding,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  "tutorial.libraryTab".tr(),
-                  textAlign: TextAlign.center,
-                  style: tutorialTextStyle,
-                ),
-                const SizedBox(height: 16),
-                ElevatedButton(
-                  onPressed: () => _tutorialCoachMark?.next(),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.black,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("tutorial.continue".tr()),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-
-      // 8) Profile tab (mention Replay)
-      TargetFocus(
-        identify: "ProfileTab",
-        keyTarget: _tabProfileKey,
-        contents: [
-          TargetContent(
-            align: ContentAlign.custom,
-            customPosition: CustomTargetContentPosition(
-              top: middleTop,
-              left: sidePadding,
-              right: sidePadding,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  "tutorial.profileTab".tr(),
-                  textAlign: TextAlign.center,
-                  style: tutorialTextStyle,
-                ),
-                const SizedBox(height: 16),
-                ElevatedButton(
-                  onPressed: () => _tutorialCoachMark?.next(),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.black,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("tutorial.continue".tr()),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-
-      // 9) FirstFlag (FINAL)
+      // 5) FirstFlag
       TargetFocus(
         identify: "FirstFlag",
         keyTarget: _firstFlagKey,
@@ -1355,20 +902,6 @@ class _MainPageState extends State<MainPage> {
                   style: tutorialTextStyle,
                 ),
                 const SizedBox(height: 16),
-                ElevatedButton(
-                  onPressed: () => _tutorialCoachMark?.finish(),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.black,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                    child: Text("tutorial.finish".tr()),
-                  ),
-                ),
               ],
             ),
           ),
@@ -1376,25 +909,80 @@ class _MainPageState extends State<MainPage> {
       ),
     ];
 
-    // build and show
+    if (startIndex >= allTargets.length) {
+      return;
+    }
+
+    final targets = allTargets.sublist(startIndex);
+
     _tutorialCoachMark = TutorialCoachMark(
       targets: targets,
       colorShadow: Colors.black87,
-      textSkip: "tutorial.skip".tr(),
-      textStyleSkip: const TextStyle(color: Colors.white),
-      // Move SKIP to center + skipYOffset down
-      alignSkip: Alignment(0, skipYOffset),
-      showSkipInLastTarget: false,
+      hideSkip: true,
       paddingFocus: 10,
       onFinish: () {
-        print("Tutorial finished");
-        AnalyticsService.instance.logTutorialComplete();
+        _tutorialCoachMark = null;
+        debugPrint("Top-row tutorial finished");
       },
-      onClickTarget: (t) => print("Clicked on ${t.identify}"),
-      onSkip: () {
-        print("Tutorial skipped");
-        AnalyticsService.instance.logTutorialSkip();
-        return true;
+      onClickTarget: (t) {
+        final identify = t.identify?.toString();
+        final globalIndex = identify != null
+            ? _tutorialTargetOrder.indexOf(identify)
+            : -1;
+        final nextIndex =
+            globalIndex >= 0 ? globalIndex + 1 : _tutorialCurrentStartIndex + 1;
+
+        if (identify == "Gear") {
+          _tutorialWaitingForCategoryPopup = true;
+          _hideTutorialOverlay();
+          return _showCategorySelectionPopup().whenComplete(() {
+            if (_tutorialWaitingForCategoryPopup) {
+              _tutorialWaitingForCategoryPopup = false;
+            }
+            _resumeTutorialFrom(nextIndex);
+          });
+        } else if (identify == "Streak") {
+          _tutorialWaitingForCalendarPopup = true;
+          _hideTutorialOverlay();
+          return _showCalendarPopup().whenComplete(() {
+            if (_tutorialWaitingForCalendarPopup) {
+              _tutorialWaitingForCalendarPopup = false;
+            }
+            _resumeTutorialFrom(nextIndex);
+          });
+        } else if (identify == "Lives") {
+          _tutorialWaitingForLivesPopup = true;
+          _hideTutorialOverlay();
+          return _showLivesPopup().whenComplete(() {
+            if (_tutorialWaitingForLivesPopup) {
+              _tutorialWaitingForLivesPopup = false;
+            }
+            _resumeTutorialFrom(nextIndex);
+          });
+        } else if (identify == "LevelProgress") {
+          _hideTutorialOverlay();
+          final future = homePageTutorialBridge?.showLevelProgress?.call();
+          if (future != null) {
+            return future.whenComplete(() {
+              _resumeTutorialFrom(nextIndex);
+            });
+          } else {
+            _resumeTutorialFrom(nextIndex);
+          }
+        } else if (identify == "FirstFlag") {
+          // Finish the tutorial and start the first flag challenge
+          unawaited(TutorialService.instance.setFirstFlagStarted(true));
+          unawaited(_updateTutorialStage(TutorialStage.topRow));
+          _tutorialCoachMark?.finish();
+          try {
+            homePageTutorialBridge?.startFirstFlagChallenge();
+          } catch (e) {
+            debugPrint("Error starting first flag from tutorial: $e");
+          }
+        } else {
+          print("Clicked on ${t.identify}");
+        }
+        return null;
       },
     );
 
@@ -1402,6 +990,173 @@ class _MainPageState extends State<MainPage> {
       context: context,
       rootOverlay: true,
     );
+  }
+
+  Future<void> _maybeStartTabsTutorial() async {
+    if (_isTabsTutorialActive) return;
+    final stage = await TutorialService.instance.getTutorialStage();
+    if (stage != TutorialStage.tabsReady) return;
+    if (!mounted) return;
+    setState(() {
+      _tutorialStage = stage;
+      _isTabsTutorialActive = true;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _showTabsTutorial());
+  }
+
+  void _showTabsTutorial() {
+    setState(() {
+      _currentTabTutorialStep = 0;
+      _isTabsTutorialActive = true;
+    });
+
+    // Show first tab coach mark
+    _showNextTabCoachMark();
+  }
+
+  /// Show the coach mark for the current tab step
+  void _showNextTabCoachMark() {
+    if (_currentTabTutorialStep >= 4) {
+      _completeTabsTutorial();
+      return;
+    }
+
+    // Determine which tab to highlight
+    GlobalKey targetKey;
+    String textKey;
+    int targetIndex;
+
+    switch (_currentTabTutorialStep) {
+      case 0:
+        targetKey = _tabTrainingKey;
+        textKey = 'tutorial.trainingTab';
+        targetIndex = 1;
+        break;
+      case 1:
+        targetKey = _tabRaceKey;
+        textKey = 'tutorial.multiplayer';
+        targetIndex = 2;
+        break;
+      case 2:
+        targetKey = _tabLibraryKey;
+        textKey = 'tutorial.libraryTab';
+        targetIndex = 3;
+        break;
+      case 3:
+        targetKey = _tabProfileKey;
+        textKey = 'tutorial.profileTab';
+        targetIndex = 4;
+        break;
+      default:
+        return;
+    }
+
+    final size = MediaQuery.of(context).size;
+    final middleTop = size.height * 0.5 - 50;
+    final sidePadding = size.width * 0.1;
+
+    const TextStyle tutorialTextStyle = TextStyle(
+      color: Colors.white,
+      fontSize: 18,
+      fontWeight: FontWeight.w500,
+    );
+
+    _tutorialCoachMark = TutorialCoachMark(
+      targets: [
+        TargetFocus(
+          identify: "Tab_$_currentTabTutorialStep",
+          keyTarget: targetKey,
+          contents: [
+            TargetContent(
+              align: ContentAlign.custom,
+              customPosition: CustomTargetContentPosition(
+                top: middleTop,
+                left: sidePadding,
+                right: sidePadding,
+              ),
+              child: Text(
+                textKey.tr(),
+                textAlign: TextAlign.center,
+                style: tutorialTextStyle,
+              ),
+            ),
+          ],
+        ),
+      ],
+      colorShadow: Colors.transparent, // No dark overlay - show pages clearly!
+      hideSkip: true,
+      paddingFocus: 10,
+      onClickTarget: (t) {
+        // Switch to that tab
+        setState(() {
+          _currentIndex = targetIndex;
+        });
+
+        // Close coach mark
+        _tutorialCoachMark?.finish();
+        _tutorialCoachMark = null;
+
+        // Show overlay with explanation
+        Future.delayed(const Duration(milliseconds: 300), () {
+          if (mounted && _isTabsTutorialActive) {
+            setState(() {
+              _showTabTutorialOverlay = true;
+              switch (_currentTabTutorialStep) {
+                case 0:
+                  _tabTutorialOverlayText = 'tutorial.tabs.training';
+                  break;
+                case 1:
+                  _tabTutorialOverlayText = 'tutorial.tabs.race';
+                  break;
+                case 2:
+                  _tabTutorialOverlayText = 'tutorial.tabs.library';
+                  break;
+                case 3:
+                  _tabTutorialOverlayText = 'tutorial.tabs.profile';
+                  break;
+              }
+            });
+          }
+        });
+      },
+    );
+
+    _tutorialCoachMark?.show(
+      context: context,
+      rootOverlay: true,
+    );
+  }
+
+  /// Advance to the next tab in the tutorial
+  void _advanceTabTutorial() {
+    setState(() {
+      _showTabTutorialOverlay = false;
+      _tabTutorialOverlayText = null;
+      _currentTabTutorialStep++;
+    });
+
+    // Show next tab coach mark
+    _showNextTabCoachMark();
+  }
+
+  Future<void> _completeTabsTutorial() async {
+    _tutorialCoachMark = null;
+    if (mounted) {
+      setState(() {
+        _isTabsTutorialActive = false;
+      });
+    } else {
+      _isTabsTutorialActive = false;
+    }
+    await TutorialService.instance.markTutorialCompleted();
+    if (mounted) {
+      setState(() {
+        _tutorialStage = TutorialStage.completed;
+      });
+    } else {
+      _tutorialStage = TutorialStage.completed;
+    }
+    AnalyticsService.instance.logTutorialComplete();
   }
 
   String _getStreakTitle(int streak) {
@@ -1426,7 +1181,7 @@ class _MainPageState extends State<MainPage> {
   void showAchievementSnackBar(String title) {
     scaffoldMessengerKey.currentState?.showSnackBar(
       SnackBar(
-        content: Text("profile.achievementUnlocked".tr(namedArgs: {'title': title})),
+        content: Text("achievements.unlocked".tr(namedArgs: {'title': title})),
         duration: const Duration(seconds: 2),
         behavior: SnackBarBehavior.floating,
         backgroundColor: Colors.black87,
@@ -1567,6 +1322,8 @@ class _MainPageState extends State<MainPage> {
         await prefs.setStringList('playHistory', completionDays);
       }
     }
+
+    await _maybeStartTabsTutorial();
   }
 
   void _onTabTapped(int index) {
@@ -1575,8 +1332,8 @@ class _MainPageState extends State<MainPage> {
     });
   }
 
-  void _showCategorySelectionPopup() {
-    showDialog(
+  Future<void> _showCategorySelectionPopup() {
+    return showDialog(
       context: context,
       barrierColor: Colors.black.withOpacity(0.7),
       builder: (context) {
@@ -1654,8 +1411,10 @@ class _MainPageState extends State<MainPage> {
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: Text('common.close'.tr()),
+              onPressed: () {
+                Navigator.of(context).pop();
+              },
+              child: Text('calendar.close'.tr(), style: const TextStyle(fontSize: 16)),
             ),
           ],
         );
@@ -1762,12 +1521,15 @@ class _MainPageState extends State<MainPage> {
             ),
             actions: [
               TextButton(
-                onPressed: () => Navigator.of(context).pop(),
+                onPressed: () {
+                  Navigator.of(context).pop();
+                },
                 child: Text('common.ok'.tr(), style: const TextStyle(fontSize: 16)),
               ),
             ],
           );
         } else {
+          // inside the AlertDialog you return when lives < _maxLives
           return AlertDialog(
             backgroundColor: const Color(0xFF1E1E1E),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -1839,21 +1601,23 @@ class _MainPageState extends State<MainPage> {
                     const SizedBox(height: 12),
 
                     // Watch ad button to recover 1 life
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        icon: const Icon(Icons.video_library),
-                        label: Text('lives.watchAdPlusOne'.tr()),
-                        style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          backgroundColor: const Color(0xFFE53935),
+                    if (!PremiumService.instance.isPremium)
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          icon: const Icon(Icons.video_library),
+                          label: Text('lives.watchAdPlusOne'.tr()),
+                          style: ElevatedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            backgroundColor: const Color(0xFFE53935),
+                          ),
+                          onPressed: () {
+                            Navigator.of(context).pop();
+                            _onWatchAdForLife();
+                          },
                         ),
-                        onPressed: () {
-                          Navigator.of(context).pop();
-                          _onWatchAdForLife();
-                        },
                       ),
-                    ),
+
                     const SizedBox(height: 8),
 
                     // TRAINING CTA: jump to Training tab so user can earn a life
@@ -1880,34 +1644,36 @@ class _MainPageState extends State<MainPage> {
                         },
                       ),
                     ),
+
                     const SizedBox(height: 8),
 
                     // Upgrade hint inside popup
-                    SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton.icon(
-                        icon: const Icon(Icons.star, color: Colors.white),
-                        label: Text('lives.unlimitedHearts'.tr()),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          side: const BorderSide(color: Color(0xFFE53935), width: 2),
+                    if (!PremiumService.instance.isPremium)
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.star, color: Colors.white),
+                          label: Text('lives.unlimitedHearts'.tr()),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            side: const BorderSide(color: Color(0xFFE53935), width: 2),
+                          ),
+                          onPressed: () {
+                            Navigator.of(context).pop();
+                            Navigator.of(context).pushNamed('/premium');
+                          },
                         ),
-                        onPressed: () {
-                          Navigator.of(context).pop();
-                          Navigator.of(context, rootNavigator: true).push(
-                            MaterialPageRoute(builder: (_) => const PremiumPage()),
-                          );
-                        },
                       ),
-                    ),
                   ],
                 );
               },
             ),
             actions: [
               TextButton(
-                onPressed: () => Navigator.of(context).pop(),
+                onPressed: () {
+                  Navigator.of(context).pop();
+                },
                 child: Text('common.ok'.tr(), style: const TextStyle(fontSize: 16)),
               ),
             ],
@@ -1917,14 +1683,14 @@ class _MainPageState extends State<MainPage> {
     );
   }
 
-  void _showCalendarPopup() async {
+  Future<void> _showCalendarPopup() async {
     // Track calendar viewed
     AnalyticsService.instance.logCalendarViewed();
 
     final prefs = await SharedPreferences.getInstance();
     final rawJson   = prefs.getString('dailyCounts') ?? '{}';
     final Map<String, dynamic> dailyCounts = json.decode(rawJson);
-    showDialog(
+    return showDialog(
       context: context,
       barrierColor: Colors.black.withOpacity(0.7),
       builder: (_) => AlertDialog(
@@ -1934,7 +1700,7 @@ class _MainPageState extends State<MainPage> {
           children: [
             Icon(Icons.calendar_today, color: Colors.orange.shade400, size: 24),
             const SizedBox(width: 8),
-            Expanded(child: Text('calendar.title'.tr())),
+            Expanded(child: Text("calendar.title".tr())),
           ],
         ),
         content: Column(
@@ -1954,7 +1720,7 @@ class _MainPageState extends State<MainPage> {
               child: Column(
                 children: [
                   Text(
-                    'calendar.complete5'.tr(),
+                    "calendar.complete5".tr(),
                     style: TextStyle(fontSize: 13, color: Colors.white.withOpacity(0.9)),
                     textAlign: TextAlign.center,
                   ),
@@ -1975,8 +1741,10 @@ class _MainPageState extends State<MainPage> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text('calendar.close'.tr(), style: const TextStyle(fontSize: 16)),
+            onPressed: () {
+              Navigator.pop(context);
+            },
+            child: Text("calendar.close".tr(), style: const TextStyle(fontSize: 16)),
           ),
         ],
       ),
@@ -2104,7 +1872,19 @@ class _MainPageState extends State<MainPage> {
         centerTitle: true,
       ),
 
-      body: _pages[_currentIndex],
+      body: Stack(
+        children: [
+          _pages[_currentIndex],
+
+          // Tabs tutorial overlay (shown after tab switch)
+          if (_showTabTutorialOverlay && _tabTutorialOverlayText != null)
+            TutorialOverlay(
+              textKey: _tabTutorialOverlayText!,
+              onContinue: _advanceTabTutorial,
+              showContinueButton: true,
+            ),
+        ],
+      ),
 
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _currentIndex,
@@ -2165,30 +1945,29 @@ class _PlayCalendarWidgetState extends State<PlayCalendarWidget> {
   late int currentYear;
   late int currentMonth;
 
-  // Replace the previous static const lists with these getters that pull from assets
   List<String> get weekDays => [
-    tr('calendar.weekdays.mon'),
-    tr('calendar.weekdays.tue'),
-    tr('calendar.weekdays.wed'),
-    tr('calendar.weekdays.thu'),
-    tr('calendar.weekdays.fri'),
-    tr('calendar.weekdays.sat'),
-    tr('calendar.weekdays.sun'),
+    'calendar.weekdays.mon'.tr(),
+    'calendar.weekdays.tue'.tr(),
+    'calendar.weekdays.wed'.tr(),
+    'calendar.weekdays.thu'.tr(),
+    'calendar.weekdays.fri'.tr(),
+    'calendar.weekdays.sat'.tr(),
+    'calendar.weekdays.sun'.tr()
   ];
 
   List<String> get monthNames => [
-    tr('calendar.months.january'),
-    tr('calendar.months.february'),
-    tr('calendar.months.march'),
-    tr('calendar.months.april'),
-    tr('calendar.months.may'),
-    tr('calendar.months.june'),
-    tr('calendar.months.july'),
-    tr('calendar.months.august'),
-    tr('calendar.months.september'),
-    tr('calendar.months.october'),
-    tr('calendar.months.november'),
-    tr('calendar.months.december'),
+    "calendar.months.january".tr(),
+    "calendar.months.february".tr(),
+    "calendar.months.march".tr(),
+    "calendar.months.april".tr(),
+    "calendar.months.may".tr(),
+    "calendar.months.june".tr(),
+    "calendar.months.july".tr(),
+    "calendar.months.august".tr(),
+    "calendar.months.september".tr(),
+    "calendar.months.october".tr(),
+    "calendar.months.november".tr(),
+    "calendar.months.december".tr()
   ];
 
   @override

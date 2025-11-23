@@ -18,6 +18,7 @@ import 'package:google_mobile_ads/google_mobile_ads.dart';
 import '../services/premium_service.dart';
 import 'premium_page.dart';
 import '../services/audio_feedback.dart'; // keep your audio hook if used
+import '../services/tutorial_service.dart';
 
 // New: ads + persistence for temporary ad-granted trials
 import '../services/ad_service.dart';
@@ -77,6 +78,8 @@ class _TrainingPageState extends State<TrainingPage> {
   // Completer used to wait for the ad reward callback
   Completer<bool>? _adGrantCompleter;
 
+  bool _tabIntroShown = false;
+
   @override
   void initState() {
     super.initState();
@@ -85,6 +88,18 @@ class _TrainingPageState extends State<TrainingPage> {
     // Load persisted temporary ad trials
     _loadTempAdTrials();
     // Make sure PremiumService is initialized in app start (Main). If not, ensure init is called elsewhere.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowTabIntro());
+  }
+
+  Future<void> _maybeShowTabIntro() async {
+    if (_tabIntroShown) return;
+    final tutorialService = TutorialService.instance;
+    final stage = await tutorialService.getTutorialStage();
+    if (stage != TutorialStage.tabsReady) return;
+    if (await tutorialService.hasShownTabIntro('training')) return;
+    await tutorialService.markTabIntroShown('training');
+    _tabIntroShown = true;
+    if (!mounted) return;
   }
 
   Future<void> _loadTempAdTrials() async {

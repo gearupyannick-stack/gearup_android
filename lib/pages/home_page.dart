@@ -1,16 +1,30 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'package:car_learning_app/services/image_service_cache.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:csv/csv.dart';
-import '../services/image_service_cache.dart';
 import '../services/audio_feedback.dart';
 import '../services/ad_service.dart';
 import '../services/analytics_service.dart';
 import '../services/language_service.dart';
+import '../services/tutorial_service.dart';
+
+class HomePageTutorialBridge {
+  final void Function() startFirstFlagChallenge;
+  final Future<void> Function()? showLevelProgress;
+
+  HomePageTutorialBridge({
+    required this.startFirstFlagChallenge,
+    this.showLevelProgress,
+  });
+}
+
+// Global bridge used by MainPage tutorial
+HomePageTutorialBridge? homePageTutorialBridge;
 
 /// Raw track point definitions for tracks 2 & 3.
 final Map<int, List<Offset>> _tracks = {
@@ -77,9 +91,8 @@ class HomePage extends StatefulWidget {
   final dynamic livesStorage;
   final VoidCallback onChallengeFail;
   final ValueChanged<int> onGearUpdate;
-  final VoidCallback? recordChallengeCompletion;
+  final Future<void> Function()? recordChallengeCompletion;
   final GlobalKey? levelProgressKey;
-  final ValueChanged<int>? onLivesChanged;
 
   const HomePage({
     Key? key,
@@ -91,7 +104,6 @@ class HomePage extends StatefulWidget {
     this.recordChallengeCompletion,
     this.firstFlagKey,
     this.levelProgressKey,
-    this.onLivesChanged,
   }) : super(key: key);
 
   @override
@@ -130,10 +142,10 @@ mixin AudioAnswerMixin<T extends StatefulWidget> on State<T> {
   }
 
 }
-
 class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin, AudioAnswerMixin {
   bool _didInitDependencies = false;
   int _consecutiveFails = 0;
+  bool _isShowingAdAction = false;
 
   // ─── Stats helpers ──────────────────────────────────────────────────────────
   Future<void> _incrementChallengesAttempted() async {
@@ -154,6 +166,41 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     await prefs.setInt('correctAnswerCount', curr + 1);
   }
   // ────────────────────────────────────────────────────────────────────────────
+
+  /// Watch ad to pass a question
+  Future<void> _onWatchAdToPass(Future<void> Function() onPassAction) async {
+    if (_isShowingAdAction) return;
+    setState(() => _isShowingAdAction = true);
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(SnackBar(content: Text('lives.loadingAd'.tr())));
+
+    try {
+      final shown = await AdService.instance.showRewardedHomePass(
+        onPassed: () async {
+          // This callback runs when the ad grant is received.
+          try {
+            await onPassAction();
+          } catch (e) {
+            debugPrint('onPassAction failed: $e');
+          }
+        },
+      );
+
+      messenger.clearSnackBars();
+
+      if (shown) {
+        messenger.showSnackBar(SnackBar(content: Text('home.passedGoodLuck'.tr())));
+      } else {
+        messenger.showSnackBar(SnackBar(content: Text('lives.adUnavailable'.tr())));
+      }
+    } catch (e) {
+      messenger.clearSnackBars();
+      messenger.showSnackBar(SnackBar(content: Text('home.errorShowingAd'.tr(namedArgs: {'error': e.toString()}))));
+      debugPrint('Error in _onWatchAdToPass: $e');
+    } finally {
+      if (mounted) setState(() => _isShowingAdAction = false);
+    }
+  }
 
   // Fractional track1 flags (extended for more points).
   static const List<Offset> _flagFractionsTrack1 = [
@@ -226,9 +273,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   static const double _originalTrackWidth  = 1024;
   static const double _originalTrackHeight = 1536;
 
-  // --- HomePage: ad + UI state
-  bool _isShowingAdAction = false;       // to block double-taps while ad loads/shows
-
   List<Offset> get _currentPathPoints {
     final media     = MediaQuery.of(context);
     final paddingTop    = media.padding.top;
@@ -274,8 +318,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   // ignore: unused_field
   bool _awaitingFlagTap = false;
   bool _retryButtonActive = false;
-  // ignore: unused_field
-  bool _showRetryButton = false;
   late Set<int> _flagIndices;
   final Map<int, String> _flagStatus     = {};
   final Map<int, String> _challengeColors = {};
@@ -306,6 +348,26 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   }
 
   int _requiredGearsForCurrentLevel() => getGearRequirement();
+
+  void _startFirstFlagFromTutorial() {
+    if (!mounted) return;
+
+    final indices = _flagIndicesSorted;
+    if (indices.isEmpty) return;
+
+    final int firstIdx = indices.first;
+
+    _onFlagTap(firstIdx);
+  }
+
+  Future<void> _maybePromoteTutorialAfterChallenge() async {
+    final tutorialService = TutorialService.instance;
+    if (await tutorialService.isFirstFlagStarted()) {
+      await tutorialService.advanceToTabsStage();
+      await tutorialService.setFirstFlagStarted(false);
+      await tutorialService.resetTabIntros();
+    }
+  }
 
   int _calculateGearCountBeforeLevel(int lvl) {
     int total = 0;
@@ -459,6 +521,12 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     for (int idx in _flagIndices) {
       _flagStatus[idx] = 'red';
     }
+
+    // Register tutorial bridge so MainPage can trigger the first flag
+    homePageTutorialBridge = HomePageTutorialBridge(
+      startFirstFlagChallenge: _startFirstFlagFromTutorial,
+      showLevelProgress: _showTrackPopup,
+    );
   }
 
   Future<void> _saveGearCount() async {
@@ -468,8 +536,8 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     await prefs.setInt('gearCountBeforeLevel', _gearCountBeforeLevel);
   }
 
-  /// Track gear earning and check for milestones
-  void _trackGearEarned(int previousGearCount, int newGearCount, {String? source}) {
+  /// Track gear updates in Analytics
+  void _trackGearUpdate(int previousGearCount, int newGearCount, {String? source}) {
     final gearsEarned = newGearCount - previousGearCount;
     if (gearsEarned <= 0) return;
 
@@ -498,39 +566,66 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     }
   }
 
-  Future<void> _onWatchAdToPass(Future<void> Function() onPassAction) async {
-    if (_isShowingAdAction) return;
-    setState(() => _isShowingAdAction = true);
-    final messenger = ScaffoldMessenger.of(context);
-    messenger.showSnackBar(SnackBar(content: Text('lives.loadingAd'.tr())));
-
-    try {
-      final shown = await AdService.instance.showRewardedHomePass(
-        onPassed: () async {
-          // This callback runs when the ad grant is received.
-          try {
-            await onPassAction();
-          } catch (e) {
-            debugPrint('onPassAction failed: $e');
-          }
-        },
-      );
-
-      messenger.clearSnackBars();
-
-      if (shown) {
-        messenger.showSnackBar(SnackBar(content: Text('home.passedGoodLuck'.tr())));
-      } else {
-        messenger.showSnackBar(SnackBar(content: Text('lives.adUnavailable'.tr())));
-      }
-    } catch (e) {
-      messenger.clearSnackBars();
-      messenger.showSnackBar(SnackBar(content: Text('home.errorShowingAd'.tr(namedArgs: {'error': e.toString()}))));
-      debugPrint('Error in _onWatchAdToPass: $e');
-    } finally {
-      if (mounted) setState(() => _isShowingAdAction = false);
+  Future<void> _loadGearCount() async {
+    final prefs = await SharedPreferences.getInstance();
+    _gearCount = prefs.getInt('gearCount') ?? 0;
+    if (_gearCount < 750) {
+      _currentTrack = 1;
+      _gearCountBeforeLevel = 0;
+    } else if (_gearCount < 3250) {
+      _currentTrack = 2;
+      _gearCountBeforeLevel = 750;
+    } else {
+      _currentTrack = 3;
+      _gearCountBeforeLevel = 3250;
     }
+    int extraGears = _gearCount - _gearCountBeforeLevel;
+    int maxLevelsInTrack = _maxLevelsForTrack();
+    int currentTrackLevel = 0;
+    for (int lvl = 1; lvl <= maxLevelsInTrack; lvl++) {
+      int requiredForLevel = (_currentTrack == 3 && lvl >= 20) ? 220 : (30 + (lvl - 1) * 10);
+      if (extraGears >= requiredForLevel) {
+        extraGears -= requiredForLevel;
+        currentTrackLevel = lvl;
+      } else {
+        break;
+      }
+    }
+    _sessionsCompleted = currentTrackLevel;
+    _gearCountBeforeLevel += _calculateGearCountBeforeLevel(currentTrackLevel);
+    widget.onGearUpdate(_gearCount);
+    setState(() {
+      _flagIndices = Set<int>.from(_flagIndicesSorted);
+    });
   }
+
+  // Audio helper wrappers — place-les dans _HomePageState
+  void _audioPlayTap() {
+    try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
+  }
+
+  void _audioPlayAnswerCorrect() {
+    try { AudioFeedback.instance.playEvent(SoundEvent.answerCorrect); } catch (_) {}
+  }
+
+  void _audioPlayAnswerWrong() {
+    try { AudioFeedback.instance.playEvent(SoundEvent.answerWrong); } catch (_) {}
+  }
+
+  void _audioPlayStreak({int? milestone}) {
+    try {
+      if (milestone != null) {
+        AudioFeedback.instance.playEvent(SoundEvent.streak, meta: {'milestone': milestone});
+      } else {
+        AudioFeedback.instance.playEvent(SoundEvent.streak);
+      }
+    } catch (_) {}
+  }
+
+  void _audioPlayPageFlip() {
+    try { AudioFeedback.instance.playEvent(SoundEvent.pageFlip); } catch (_) {}
+  }
+
 
   Future<void> _showStuckPopup({required Future<void> Function() onPassAction}) async {
     await showDialog(
@@ -668,66 +763,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     );
   }
 
-  Future<void> _loadGearCount() async {
-    final prefs = await SharedPreferences.getInstance();
-    _gearCount = prefs.getInt('gearCount') ?? 0;
-    if (_gearCount < 750) {
-      _currentTrack = 1;
-      _gearCountBeforeLevel = 0;
-    } else if (_gearCount < 3250) {
-      _currentTrack = 2;
-      _gearCountBeforeLevel = 750;
-    } else {
-      _currentTrack = 3;
-      _gearCountBeforeLevel = 3250;
-    }
-    int extraGears = _gearCount - _gearCountBeforeLevel;
-    int maxLevelsInTrack = _maxLevelsForTrack();
-    int currentTrackLevel = 0;
-    for (int lvl = 1; lvl <= maxLevelsInTrack; lvl++) {
-      int requiredForLevel = (_currentTrack == 3 && lvl >= 20) ? 220 : (30 + (lvl - 1) * 10);
-      if (extraGears >= requiredForLevel) {
-        extraGears -= requiredForLevel;
-        currentTrackLevel = lvl;
-      } else {
-        break;
-      }
-    }
-    _sessionsCompleted = currentTrackLevel;
-    _gearCountBeforeLevel += _calculateGearCountBeforeLevel(currentTrackLevel);
-    widget.onGearUpdate(_gearCount);
-    setState(() {
-      _flagIndices = Set<int>.from(_flagIndicesSorted);
-    });
-  }
-
-  // Audio helper wrappers — place-les dans _HomePageState
-  void _audioPlayTap() {
-    try { AudioFeedback.instance.playEvent(SoundEvent.tap); } catch (_) {}
-  }
-
-  void _audioPlayAnswerCorrect() {
-    try { AudioFeedback.instance.playEvent(SoundEvent.answerCorrect); } catch (_) {}
-  }
-
-  void _audioPlayAnswerWrong() {
-    try { AudioFeedback.instance.playEvent(SoundEvent.answerWrong); } catch (_) {}
-  }
-
-  void _audioPlayStreak({int? milestone}) {
-    try {
-      if (milestone != null) {
-        AudioFeedback.instance.playEvent(SoundEvent.streak, meta: {'milestone': milestone});
-      } else {
-        AudioFeedback.instance.playEvent(SoundEvent.streak);
-      }
-    } catch (_) {}
-  }
-
-  void _audioPlayPageFlip() {
-    try { AudioFeedback.instance.playEvent(SoundEvent.pageFlip); } catch (_) {}
-  }
-
   Future<void> _loadCarData() async {
     try {
       final rawCsv = await rootBundle.loadString('assets/cars.csv');
@@ -800,7 +835,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       }
     }
     if (_currentIndex == _finalFlagIndex && _challengeColors[_challengeNumberForFlag(_currentIndex)] != 'green') {
-      _showRetryButton = true;
     }
     setState(() {});
   }
@@ -1023,6 +1057,15 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       _awaitingFlagTap = false;
 
       if (!_isCorrectionRun) {
+        // Check if this is the first flag during tutorial - force success
+        final tutorialService = TutorialService.instance;
+        final bool isFirstFlagTutorial = await tutorialService.isFirstFlagStarted();
+
+        // Override score to full success if tutorial first flag
+        if (isFirstFlagTutorial) {
+          quizScore = questionMethods.length; // Force perfect score (3/3)
+        }
+
         if (_currentIndex != _finalFlagIndex) {
           if (quizScore >= (questionMethods.length / 2).ceil()) {
             _consecutiveFails = 0;
@@ -1032,6 +1075,9 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
             final previousGearCount = _gearCount;
             _gearCount += delta;
             _previousScores[flagIndex] = quizScore;
+
+            // Track gear update
+            _trackGearUpdate(previousGearCount, _gearCount, source: 'challenge');
 
             if (quizScore == questionMethods.length) {
               _flagStatus[flagIndex] = 'green';
@@ -1046,10 +1092,10 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
             await _saveGearCount();
             widget.onGearUpdate(_gearCount);
-            _trackGearEarned(previousGearCount, _gearCount, source: 'challenge');
             _retryButtonActive = false;
             _animateToNextPoint();
-            widget.recordChallengeCompletion?.call();
+            await _maybePromoteTutorialAfterChallenge();
+            await widget.recordChallengeCompletion?.call();
           } else {
             _consecutiveFails++;
             await _saveConsecutiveFails();
@@ -1058,6 +1104,9 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
             _challengeColors[challengeNumber] = 'red';
             widget.onChallengeFail();
             _retryButtonActive = false;
+
+            // Call recordChallengeCompletion even on failure to continue tutorial
+            await widget.recordChallengeCompletion?.call();
 
             if (_consecutiveFails >= 3) {
               // Offer the stuck popup and provide a pass-action that grants full success:
@@ -1081,9 +1130,10 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                   _previousScores[flagIndex] = totalQuestions;
                   await _saveGearCount();
                   widget.onGearUpdate(_gearCount);
-                  _trackGearEarned(previousGearCount, _gearCount, source: 'ad_pass');
+                  _trackGearUpdate(previousGearCount, _gearCount, source: 'ad_pass');
                   // count as a completed challenge for daily streaks / history
-                  widget.recordChallengeCompletion?.call();
+                  await _maybePromoteTutorialAfterChallenge();
+                  await widget.recordChallengeCompletion?.call();
                 }
 
                 // 3) Persist progress and move forward
@@ -1107,7 +1157,11 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
               _challengeColors[challengeNumber] = 'red';
               widget.onChallengeFail();
               _retryButtonActive = false;
-              _showRetryButton = true;
+
+              // Call recordChallengeCompletion even on failure to continue tutorial
+              await _maybePromoteTutorialAfterChallenge();
+              await widget.recordChallengeCompletion?.call();
+
               await _saveProgressToStorage();
               setState(() {});
               return;
@@ -1118,9 +1172,12 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
             final previousGearCount = _gearCount;
             _gearCount += delta;
             _previousScores[flagIndex] = quizScore;
+
+            // Track gear update
+            _trackGearUpdate(previousGearCount, _gearCount, source: 'challenge');
             await _saveGearCount();
             widget.onGearUpdate(_gearCount);
-            _trackGearEarned(previousGearCount, _gearCount, source: 'final_flag');
+
 
             await prefs.setStringList('unlockedAchievements', unlocked);
           } else {
@@ -1129,7 +1186,10 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
             _challengeColors[challengeNumber] = 'red';
             widget.onChallengeFail();
             _retryButtonActive = false;
-            _showRetryButton = true;
+
+            // Call recordChallengeCompletion even on failure to continue tutorial
+            await _maybePromoteTutorialAfterChallenge();
+            await widget.recordChallengeCompletion?.call();
           }
         }
       } else {
@@ -1141,10 +1201,8 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
           // Award missing gears
           int delta = quizScore - prevScore;
-          final previousGearCount = _gearCount;
           _gearCount += delta;
           _previousScores[flagIndex] = quizScore;
-          _trackGearEarned(previousGearCount, _gearCount, source: 'correction_run');
 
           // Update flag color based on new score
           if (quizScore == totalQuestions) {
@@ -1162,7 +1220,8 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
           await _saveGearCount();
           widget.onGearUpdate(_gearCount);
 
-          widget.recordChallengeCompletion?.call();
+          await _maybePromoteTutorialAfterChallenge();
+          await widget.recordChallengeCompletion?.call();
 
           if (_flagStatus[flagIndex] == 'green') {
             // Full success: Move forward
@@ -1171,7 +1230,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
               // ✅ Final flag reached
               _awaitingFlagTap = false;
               _retryButtonActive = false;
-              _showRetryButton = false;
               await _saveProgressToStorage();
               setState(() {});
             } else {
@@ -1185,6 +1243,10 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         } else {
           // No improvement: Lose a life
           widget.onChallengeFail();
+
+          // Call recordChallengeCompletion even on failure to continue tutorial
+          await _maybePromoteTutorialAfterChallenge();
+          await widget.recordChallengeCompletion?.call();
         }
       }
 
@@ -1569,15 +1631,15 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     )) ?? false;
   }
 
-  Future<void> _saveConsecutiveFails() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt('consecutiveFails', _consecutiveFails);
-  }
+Future<void> _saveConsecutiveFails() async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setInt('consecutiveFails', _consecutiveFails);
+}
 
-  Future<void> _loadConsecutiveFails() async {
-    final prefs = await SharedPreferences.getInstance();
-    _consecutiveFails = prefs.getInt('consecutiveFails') ?? 0;
-  }
+Future<void> _loadConsecutiveFails() async {
+  final prefs = await SharedPreferences.getInstance();
+  _consecutiveFails = prefs.getInt('consecutiveFails') ?? 0;
+}
 
   Future<bool> _askSpecialFeatureQuestion(int questionNumber, {required int currentScore, required int totalQuestions}) async {
     if (carData.isEmpty) return false;
@@ -1663,8 +1725,8 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         .join();
   }
 
-  void _showTrackPopup() {
-    showDialog(
+  Future<void> _showTrackPopup() {
+    return showDialog(
       context: context,
       builder: (context) {
         return AlertDialog(
@@ -1756,7 +1818,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                             LinearProgressIndicator(
                               value: progress,
                               backgroundColor: Colors.grey[300],
-                              valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFFE53935)),
+                              valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
                             ),
                           ],
                         ),
@@ -1791,6 +1853,9 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
   @override
   void dispose() {
+    if (homePageTutorialBridge?.startFirstFlagChallenge == _startFirstFlagFromTutorial) {
+      homePageTutorialBridge = null;
+    }
     try { AudioFeedback.instance.playEvent(SoundEvent.pageClose); } catch (_) {}
     // Si CETTE classe a des contrôleurs, dispose-les ici (sinon ne mets rien).
     super.dispose();
@@ -1879,15 +1944,13 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                 left: screenPoints[idx].dx - tapSize/2,
                 top:  screenPoints[idx].dy - tapSize/2,
                 child: GestureDetector(
+                  key: (widget.firstFlagKey != null && idx == _flagIndicesSorted.first)
+                      ? widget.firstFlagKey
+                      : null,
                   behavior: HitTestBehavior.translucent,
-                  onTap: (widget.getLives() == 0 || _retryButtonActive)
+                  onTap: (widget.currentLives == 0 || _retryButtonActive)
                         ? null
-                        : () {
-                            setState(() {
-                              _showRetryButton = false;  // on désactive le flag “Retry”
-                            });
-                            _onFlagTap(idx);             // et relance directement le challenge
-                          },
+                        : () => _onFlagTap(idx),
                   child: SizedBox(
                     width: tapSize,
                     height: tapSize,
@@ -1901,7 +1964,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                   ),
                 ),
               ),
-
+              
           // ─── CAR ────────────────────────────────────────────────
           Positioned(
             left: carScreen.dx - carSize/2,
@@ -1995,7 +2058,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                               _requiredGearsForCurrentLevel(),
                           backgroundColor: Colors.transparent,
                           valueColor: const AlwaysStoppedAnimation<Color>(
-                            Color(0xFFE53935),
+                            Color(0xFF3D0000),
                           ),
                         ),
                       ),
@@ -2120,7 +2183,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                           setState(() {
                             _isCorrectionRun = true;
                             _retryButtonActive = false;
-                            _showRetryButton = false;
                           });
                           _correctMistakes();
                         },
@@ -2147,7 +2209,7 @@ class _QuestionPage extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         automaticallyImplyLeading: false, // disables back arrow
-        title: Text('home.flagChallenge'.tr()),
+        title: Text('home.flagChallenge'.tr()),    // or any title you use
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),
@@ -2244,8 +2306,7 @@ class _RandomModelBrandQuestionContentState
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(12),
                 child: Image(
-                  image: ImageCacheService.instance
-                      .imageProvider('${widget.fileBase}$i.webp'),
+                  image: ImageCacheService.instance.imageProvider('${widget.fileBase}$i.webp'),
                   height: 200,
                   width: double.infinity,
                   fit: BoxFit.cover,
@@ -2505,8 +2566,7 @@ class _DescriptionSlideshowQuestionContentState
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(12),
                 child: Image(
-                  image: ImageCacheService.instance
-                      .imageProvider('${widget.fileBase}$i.webp'),
+                  image: ImageCacheService.instance.imageProvider('${widget.fileBase}$i.webp'),
                   height: 200,
                   width: double.infinity,
                   fit: BoxFit.cover,
@@ -2655,8 +2715,7 @@ class _HorsepowerQuestionContentState
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: ImageCacheService.instance
-                    .imageProvider('${widget.fileBase}$_frameIndex.webp'),
+                image: ImageCacheService.instance.imageProvider('${widget.fileBase}$_frameIndex.webp'),
                 height: 200,
                 width: double.infinity,
                 fit: BoxFit.cover,
@@ -2814,8 +2873,7 @@ class _AccelerationQuestionContentState
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: ImageCacheService.instance
-                    .imageProvider('${widget.fileBase}$_frameIndex.webp'),
+                image: ImageCacheService.instance.imageProvider('${widget.fileBase}$_frameIndex.webp'),
                 height: 200,
                 width: double.infinity,
                 fit: BoxFit.cover,
@@ -2974,8 +3032,7 @@ class _MaxSpeedQuestionContentState
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: ImageCacheService.instance
-                    .imageProvider('${widget.fileBase}$_frameIndex.webp'),
+                image: ImageCacheService.instance.imageProvider('${widget.fileBase}$_frameIndex.webp'),
                 height: 200,
                 width: double.infinity,
                 fit: BoxFit.cover,
@@ -3133,8 +3190,7 @@ class _SpecialFeatureQuestionContentState
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: ImageCacheService.instance
-                    .imageProvider('${widget.fileBase}$_frameIndex.webp'),
+                image: ImageCacheService.instance.imageProvider('${widget.fileBase}$_frameIndex.webp'),
                 height: 200,
                 width: double.infinity,
                 fit: BoxFit.cover,
@@ -3597,8 +3653,7 @@ class _OriginCountryQuestionContentState
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: ImageCacheService.instance
-                    .imageProvider('${widget.fileBase}$_frameIndex.webp'),
+                image: ImageCacheService.instance.imageProvider('${widget.fileBase}$_frameIndex.webp'),
                 height: 220,
                 width: double.infinity,
                 fit: BoxFit.cover,
@@ -3886,8 +3941,7 @@ class _RandomCarImageQuestionContentState
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(12),
                 child: Image(
-                  image: ImageCacheService.instance
-                      .imageProvider('${widget.fileBase}$i.webp'),
+                  image: ImageCacheService.instance.imageProvider('${widget.fileBase}$i.webp'),
                   height: 200,
                   width: double.infinity,
                   fit: BoxFit.cover,

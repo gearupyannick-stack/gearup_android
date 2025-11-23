@@ -14,6 +14,7 @@ import '../services/ad_service.dart';
 import '../services/analytics_service.dart';
 import '../services/language_service.dart';
 import '../services/image_service_cache.dart';
+import '../services/tutorial_service.dart';
 
 // Design System imports
 import '../design_system/tokens.dart';
@@ -97,6 +98,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   bool _raceStarted = false;
   late final AnimationController _carController;
   final TextEditingController _nameController = TextEditingController();
+  bool _tabIntroShown = false;
 
   // --- Collab / players state ---
   final CollabWanService _collab = CollabWanService();
@@ -1911,6 +1913,19 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     // Subscribe to public track presence streams so the track buttons update live.
     // We always subscribe so the UI reflects other players even if the user hasn't joined.
     _subscribePublicTracks();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowTabIntro());
+  }
+
+  Future<void> _maybeShowTabIntro() async {
+    if (_tabIntroShown) return;
+    final tutorialService = TutorialService.instance;
+    final stage = await tutorialService.getTutorialStage();
+    if (stage != TutorialStage.tabsReady) return;
+    if (await tutorialService.hasShownTabIntro('race')) return;
+    await tutorialService.markTabIntroShown('race');
+    _tabIntroShown = true;
+    if (!mounted) return;
   }
 
   @override

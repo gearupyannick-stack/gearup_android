@@ -14,6 +14,7 @@ import '../services/auth_service.dart'; // <-- NEW: use singleton AuthService
 import '../services/language_service.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../services/analytics_service.dart';
+import '../services/tutorial_service.dart';
 
 class ProfilePage extends StatefulWidget {
   final VoidCallback? onReplayTutorial;
@@ -64,6 +65,7 @@ class _ProfilePageState extends State<ProfilePage> {
   List<String> _brandOptions = [];
   Map<String, List<String>> _brandToModels = {};
   bool _isCarDataLoaded = false;
+  bool _tabIntroShown = false;
 
   String _getAchievementIdFromName(String name) {
     return name.split("–")[0].trim().toLowerCase().replaceAll(' ', '_');
@@ -132,6 +134,7 @@ class _ProfilePageState extends State<ProfilePage> {
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkNewAchievement();
+      _maybeShowTabIntro();
     });
     _loadProfileData();
     _loadCarData();
@@ -142,6 +145,17 @@ class _ProfilePageState extends State<ProfilePage> {
     _loadChallengesAttemptedCount();
     _loadQuestionAttemptCount();
     _loadUnlockedAchievements();
+  }
+
+  Future<void> _maybeShowTabIntro() async {
+    if (_tabIntroShown) return;
+    final tutorialService = TutorialService.instance;
+    final stage = await tutorialService.getTutorialStage();
+    if (stage != TutorialStage.tabsReady) return;
+    if (await tutorialService.hasShownTabIntro('profile')) return;
+    await tutorialService.markTabIntroShown('profile');
+    _tabIntroShown = true;
+    if (!mounted) return;
   }
 
   List<String> unlockedAchievementIds = [];

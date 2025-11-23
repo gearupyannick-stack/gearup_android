@@ -7,6 +7,7 @@ import '../services/image_service_cache.dart';
 import '../services/audio_feedback.dart';
 import '../services/language_service.dart';
 import '../services/brand_info.dart';
+import '../services/tutorial_service.dart';
 
 
 class LibraryPage extends StatefulWidget {
@@ -21,6 +22,7 @@ class _LibraryPageState extends State<LibraryPage> {
   String? selectedBrand;
   bool _isBrandInfoExpanded = false;
   bool _isDataLoaded = false;
+  bool _tabIntroShown = false;
 
   @override
   void initState() {
@@ -28,6 +30,18 @@ class _LibraryPageState extends State<LibraryPage> {
 
     // audio: page open
     try { AudioFeedback.instance.playEvent(SoundEvent.pageOpen); } catch (_) {}
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowTabIntro());
+  }
+
+  Future<void> _maybeShowTabIntro() async {
+    if (_tabIntroShown) return;
+    final tutorialService = TutorialService.instance;
+    final stage = await tutorialService.getTutorialStage();
+    if (stage != TutorialStage.tabsReady) return;
+    if (await tutorialService.hasShownTabIntro('library')) return;
+    await tutorialService.markTabIntroShown('library');
+    _tabIntroShown = true;
+    if (!mounted) return;
   }
 
   @override
