@@ -8,13 +8,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:csv/csv.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../services/audio_feedback.dart';
 import '../services/collab_wan_service.dart'; // <<-- NEW
+import '../services/image_service_cache.dart';
 import '../services/ad_service.dart';
 import '../services/analytics_service.dart';
 import '../services/language_service.dart';
-import '../services/image_service_cache.dart';
 import '../services/tutorial_service.dart';
+import '../services/leaderboard_service.dart';
+import '../widgets/leaderboard_widget.dart';
 
 // Design System imports
 import '../design_system/tokens.dart';
@@ -66,19 +69,6 @@ mixin AudioAnswerMixin<T extends StatefulWidget> on State<T> {
 
 }
 
-// Helper to return the correct ImageProvider based on Android's image storage.
-// For model images (car photos), use ImageCacheService (downloads from Firebase Storage).
-// For UI assets (track backgrounds), use AssetImage (bundled in app).
-ImageProvider _assetImageProvider(String name) {
-  if (name.startsWith('assets/')) {
-    // UI assets like track backgrounds - use bundled assets
-    return AssetImage(name);
-  } else {
-    // Model car images - use cached Firebase Storage images
-    return ImageCacheService.instance.imageProvider(name);
-  }
-}
-
 // Helper to generate a unique race session ID
 String _generateRaceSessionId() {
   final timestamp = DateTime.now().millisecondsSinceEpoch;
@@ -90,15 +80,26 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
   bool isPublicMode = true;
   int? _activeTrackIndex;
   bool _inPublicRaceView = false;
+  bool _tabIntroShown = false;
+
+  // Leaderboard state
+  final LeaderboardService _leaderboardService = LeaderboardService();
+  bool _showLeaderboard = false; // false = tracks view, true = leaderboard view
+  int? _lastRatingChange; // Track rating change from last race to show notification
 
   // signal to abort the current race / quiz (set when user taps Leave inside a question)
   bool _raceAborted = false;
+
+  // Track if player already lost this race (prevents false "You won!" dialog)
+  bool _alreadyLostRace = false;
+
+  // Track if we're currently showing the loser dialog (prevents multiple dialogs)
+  bool _showingLostDialog = false;
 
   // New: race / car animation state
   bool _raceStarted = false;
   late final AnimationController _carController;
   final TextEditingController _nameController = TextEditingController();
-  bool _tabIntroShown = false;
 
   // --- Collab / players state ---
   final CollabWanService _collab = CollabWanService();
@@ -310,6 +311,176 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     );
   }
 
+  /// Show dialog when player loses a 1v1 race
+  /// Offers option to continue racing (for practice) or quit immediately
+  Future<bool> _showYouLostDialog({
+    required PlayerInfo winner,
+    int? ratingChange,
+  }) async {
+    debugPrint('_showYouLostDialog() called - winner: ${winner.displayName}, rating: $ratingChange');
+    if (!mounted) {
+      debugPrint('_showYouLostDialog() - widget not mounted, returning false');
+      return false;
+    }
+
+    debugPrint('_showYouLostDialog() - showing dialog...');
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey.shade900,
+          title: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.sentiment_dissatisfied, color: Colors.red, size: 32),
+              const SizedBox(width: 12),
+              Text(
+                'You Lost!',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Winner info
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.amber, width: 2),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.emoji_events, color: Colors.amber, size: 28),
+                          const SizedBox(width: 12),
+                          Text(
+                            'race.winnerFallback'.tr(),
+                            style: TextStyle(
+                              color: Colors.white70,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        winner.displayName,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Text(
+                        'race.scoreDisplay'.tr(namedArgs: {'score': winner.score.toString()}),
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // Rating change
+                if (ratingChange != null) ...[
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: (ratingChange < 0 ? Colors.red : Colors.green).withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: ratingChange < 0 ? Colors.red : Colors.green,
+                        width: 2,
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          ratingChange < 0 ? Icons.trending_down : Icons.trending_up,
+                          color: ratingChange < 0 ? Colors.red : Colors.green,
+                          size: 28,
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          '${'race.ratingLabel'.tr()} ${ratingChange > 0 ? '+' : ''}$ratingChange',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+
+                // Info text
+                Text(
+                  'race.continueOrQuitMessage'.tr(),
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 14,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                backgroundColor: Colors.grey.shade800,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              child: Text(
+                'race.quit'.tr(),
+                style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w500),
+              ),
+            ),
+            const SizedBox(width: 12),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+                backgroundColor: Color(0xFFE74C3C),
+                foregroundColor: Colors.white,
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              child: Text('race.finishRace'.tr(), style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
+            ),
+          ],
+        );
+      },
+    );
+
+    return result ?? false; // Default to false (quit) if dialog dismissed
+  }
+
   // Called when local player finishes all questions
   Future<void> _onRaceFinished() async {
     if (!mounted) return;
@@ -326,19 +497,40 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     // ensure the car isn't repeating
     try { _carController.stop(); } catch (_) {}
 
-    // PHASE 2 FIX: Send final score BEFORE checking _raceEndedByServer
+    // CRITICAL: If player already lost this race, skip winner logic
+    // This prevents false "You won!" dialog when loser finishes after winner left
+    if (_alreadyLostRace) {
+      debugPrint('Player already lost this race, skipping winner logic');
+
+      // Just cleanup and leave silently
+      await _leaveCurrentRoom();
+
+      if (!mounted) return;
+      setState(() {
+        _inPublicRaceView = false;
+        _activeTrackIndex = null;
+        _raceStarted = false;
+        _quizSelectedIndices = [];
+        _quizCurrentPos = 0;
+        _quizScore = 0;
+        _currentDistance = 0.0;
+        _waitingForNextQuestion = false;
+        _roomCreatorId = null;
+        _alreadyLostRace = false; // Reset flag
+        _showingLostDialog = false; // Reset dialog flag
+      });
+      return; // Exit early
+    }
+
+    // PHASE 2 FIX: Update final score in player document BEFORE checking _raceEndedByServer
     // This ensures other players see our final score even if they finish simultaneously
     final room = _currentRoomCode;
     final localId = _collab.localPlayerId;
     if (room != null) {
       try {
-        await _collab.sendMessage(room, {
-          'type': 'score_update',
-          'playerId': localId,
-          'score': _quizScore,
-        });
+        await _collab.updatePlayerScore(room, _quizScore);
       } catch (e) {
-        debugPrint('Failed to send final score update: $e');
+        debugPrint('Failed to update final player score: $e');
       }
     }
 
@@ -395,7 +587,76 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     // mark that *we* are ending the race
     _raceEndedByServer = true;
 
-    // inform others that race ended
+    // CRITICAL FIX: Store immutable race result in Firestore BEFORE leaving
+    // This ensures opponent can fetch results even after we leave
+    if (room != null && _currentRaceSessionId != null) {
+      try {
+        await _collab.createRaceResult(
+          roomCode: room,
+          raceSessionId: _currentRaceSessionId!,
+          winner: winner,
+          players: playersSnapshot,
+          timestamp: DateTime.now(),
+        );
+        debugPrint('Stored race result for session $_currentRaceSessionId');
+      } catch (e) {
+        debugPrint('Failed to store race result: $e');
+      }
+    }
+
+    // CRITICAL FIX: Update leaderboard from winner's side (has complete data)
+    // This ensures 1v1 ratings are always updated even if loser hasn't finished yet
+    if (playersSnapshot.length == 2) {
+      try {
+        final player1 = playersSnapshot[0];
+        final player2 = playersSnapshot[1];
+        final winnerId = winner.id;
+        final loserId = (player1.id == winnerId) ? player2.id : player1.id;
+        final winnerName = (player1.id == winnerId) ? player1.displayName : player2.displayName;
+        final loserName = (player1.id == winnerId) ? player2.displayName : player1.displayName;
+
+        debugPrint('1v1 race detected! Updating ELO ratings from winner side...');
+        debugPrint('Winner: $winnerName ($winnerId), Loser: $loserName ($loserId)');
+
+        final ratingChanges = await _leaderboardService.updateRatingsAfterRace(
+          winnerId: winnerId,
+          loserId: loserId,
+          winnerName: winnerName,
+          loserName: loserName,
+        );
+
+        // Store rating change for local player
+        if (mounted && localId == winnerId) {
+          setState(() {
+            _lastRatingChange = ratingChanges[0]; // Winner's change
+          });
+        } else if (mounted && localId == loserId) {
+          setState(() {
+            _lastRatingChange = ratingChanges[1]; // Loser's change
+          });
+        }
+
+        debugPrint('Rating changes: Winner ${ratingChanges[0] > 0 ? '+' : ''}${ratingChanges[0]}, Loser ${ratingChanges[1] > 0 ? '+' : ''}${ratingChanges[1]}');
+
+        // Log analytics event
+        AnalyticsService.instance.logEvent(
+          name: 'competitive_race_completed',
+          parameters: {
+            'winner_id': winnerId,
+            'loser_id': loserId,
+            'winner_rating_change': ratingChanges[0],
+            'loser_rating_change': ratingChanges[1],
+            'is_winner': (localId == winnerId),
+          },
+        );
+      } catch (e) {
+        debugPrint('Error updating ELO ratings from winner side: $e');
+      }
+    }
+
+    // Loser will detect via score check in players stream - no extra messages needed!
+
+    // Send end_race for backwards compatibility
     if (room != null) {
       try {
         await _collab.sendMessage(room, {
@@ -403,6 +664,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
           'winnerId': winner.id,
           'winnerName': winner.displayName,
           'raceSessionId': _currentRaceSessionId,
+          'leaderboardUpdated': playersSnapshot.length == 2,
         });
       } catch (e) {
         debugPrint('Failed to send end_race message: $e');
@@ -411,6 +673,47 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
     // show results dialog (blocking until user dismisses)
     await _showRaceResultDialog(playersSnapshot, winner);
+
+    // Show rating change notification if applicable
+    if (_lastRatingChange != null && mounted) {
+      try {
+        final ratingChange = _lastRatingChange!;
+        final isPositive = ratingChange > 0;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                Icon(
+                  isPositive ? Icons.trending_up : Icons.trending_down,
+                  color: isPositive ? Colors.green : Colors.red,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Rating: ${ratingChange > 0 ? '+' : ''}$ratingChange',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            backgroundColor: isPositive ? Colors.green.shade700 : Colors.red.shade700,
+            duration: const Duration(seconds: 3),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        // Clear the rating change after showing
+        setState(() {
+          _lastRatingChange = null;
+        });
+      } catch (e) {
+        debugPrint('Error showing rating change notification: $e');
+      }
+    }
+
+    // CRITICAL FIX: Delay leaving room to give opponent time to fetch race results
+    // This ensures opponent's client has time to receive end_race message and query results collection
+    await Future.delayed(const Duration(seconds: 3));
 
     // cleanup & leave room
     await _leaveCurrentRoom();
@@ -471,90 +774,282 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       final bool payloadHasWinner = (winnerId != null && winnerId.isNotEmpty) ||
                                     (winnerName != null && winnerName.isNotEmpty);
 
-      // Snapshot players to avoid concurrent mutation
-      List<PlayerInfo> playersSnapshot = List<PlayerInfo>.from(_playersInRoom);
-
-      // Ensure local player present and up-to-date in snapshot
-      final localName = _nameController.text.trim().isEmpty ? 'You' : _nameController.text.trim();
-      final idxLocal = playersSnapshot.indexWhere((p) => p.id == localId || p.displayName == localName);
-      if (idxLocal >= 0) {
-        final p = playersSnapshot[idxLocal];
-        playersSnapshot[idxLocal] = PlayerInfo(
-          id: p.id,
-          displayName: p.displayName.isNotEmpty ? p.displayName : localName,
-          lastSeen: p.lastSeen,
-          score: _quizScore,
-          errors: p.errors,
-        );
-      } else {
-        playersSnapshot.add(PlayerInfo(
-          id: localId,
-          displayName: localName,
-          lastSeen: DateTime.now(),
-          score: _quizScore,
-          errors: 0,
-        ));
+      // CRITICAL FIX: Try to fetch race result from persistent storage first
+      // This ensures we have complete player data even if winner already left room
+      // Note: messageSessionId is guaranteed non-null here due to early return above
+      Map<String, dynamic>? raceResult;
+      try {
+        raceResult = await _collab.getRaceResult(messageSessionId);
+        if (raceResult != null) {
+          debugPrint('Fetched race result from Firestore collection');
+        }
+      } catch (e) {
+        debugPrint('Failed to fetch race result: $e');
       }
 
-      // Determine winner: prefer server-provided id/name, fallback to local logic
+      List<PlayerInfo> playersSnapshot;
       PlayerInfo winner;
-      if (payloadHasWinner && winnerId != null && winnerId.isNotEmpty) {
+
+      if (raceResult != null) {
+        // Use data from race result document (immutable, reliable, complete)
+        final winnerId = raceResult['winnerId'] as String;
+        final winnerName = raceResult['winnerName'] as String;
+        final winnerScore = raceResult['winnerScore'] as int;
+
+        // Reconstruct player list from race result
+        final playersData = raceResult['players'] as List<dynamic>;
+        playersSnapshot = playersData.map((p) => PlayerInfo(
+          id: p['id'],
+          displayName: p['displayName'],
+          lastSeen: (p['lastSeen'] as Timestamp).toDate(),
+          score: p['score'],
+          errors: p['errors'],
+        )).toList();
+
         winner = playersSnapshot.firstWhere(
           (p) => p.id == winnerId,
           orElse: () => PlayerInfo(
             id: winnerId,
-            displayName: (winnerName != null && winnerName.isNotEmpty) ? winnerName : 'Winner',
-            lastSeen: DateTime.now(),
-            score: 0,
-            errors: 0,
-          ),
-        );
-      } else if (payloadHasWinner && winnerName != null && winnerName.isNotEmpty) {
-        winner = playersSnapshot.firstWhere(
-          (p) => p.displayName == winnerName,
-          orElse: () => PlayerInfo(
-            id: '',
             displayName: winnerName,
             lastSeen: DateTime.now(),
-            score: 0,
+            score: winnerScore,
             errors: 0,
           ),
         );
+
+        debugPrint('Using race result from Firestore: Winner=${winner.displayName}, Players=${playersSnapshot.length}');
       } else {
-        winner = _determineWinner(playersSnapshot);
+        // Fallback to old logic (use current room state)
+        playersSnapshot = List<PlayerInfo>.from(_playersInRoom);
+
+        // Ensure local player present and up-to-date in snapshot
+        final localName = _nameController.text.trim().isEmpty ? 'You' : _nameController.text.trim();
+        final idxLocal = playersSnapshot.indexWhere((p) => p.id == localId || p.displayName == localName);
+        if (idxLocal >= 0) {
+          final p = playersSnapshot[idxLocal];
+          playersSnapshot[idxLocal] = PlayerInfo(
+            id: p.id,
+            displayName: p.displayName.isNotEmpty ? p.displayName : localName,
+            lastSeen: p.lastSeen,
+            score: _quizScore,
+            errors: p.errors,
+          );
+        } else {
+          playersSnapshot.add(PlayerInfo(
+            id: localId,
+            displayName: localName,
+            lastSeen: DateTime.now(),
+            score: _quizScore,
+            errors: 0,
+          ));
+        }
+
+        // Determine winner: prefer server-provided id/name, fallback to local logic
+        if (payloadHasWinner && winnerId != null && winnerId.isNotEmpty) {
+          winner = playersSnapshot.firstWhere(
+            (p) => p.id == winnerId,
+            orElse: () => PlayerInfo(
+              id: winnerId,
+              displayName: (winnerName != null && winnerName.isNotEmpty) ? winnerName : 'Winner',
+              lastSeen: DateTime.now(),
+              score: 0,
+              errors: 0,
+            ),
+          );
+        } else if (payloadHasWinner && winnerName != null && winnerName.isNotEmpty) {
+          winner = playersSnapshot.firstWhere(
+            (p) => p.displayName == winnerName,
+            orElse: () => PlayerInfo(
+              id: '',
+              displayName: winnerName,
+              lastSeen: DateTime.now(),
+              score: 0,
+              errors: 0,
+            ),
+          );
+        } else {
+          winner = _determineWinner(playersSnapshot);
+        }
+
+        debugPrint('Using fallback logic (current room state): Winner=${winner.displayName}, Players=${playersSnapshot.length}');
       }
 
       // total slots expected for this race
       final totalSlots = _quizSelectedIndices.length;
       final bool localCompleted = (totalSlots > 0) && (_quizScore >= totalSlots);
 
-      // If the winner is local but local hasn't completed, ignore
-      if (winner.id == localId && !localCompleted) {
-        debugPrint('Ignoring end_race: decided winner is local but local has not completed quiz.');
+      // CRITICAL FIX: Use payload winnerId (server truth) instead of winner object
+      // The winner object may be incorrectly determined by _determineWinner() when
+      // the actual winner has already left the room and only the loser remains
+      final String? payloadWinnerId = payload['winnerId']?.toString();
+      if (payloadWinnerId != null && payloadWinnerId == localId && !localCompleted) {
+        debugPrint('Ignoring end_race: server says local won but local has not completed quiz.');
         _handlingEndRace = false;
         _raceEndedByServer = false;
         return;
       }
 
-      // If local player lost, show small SnackBar
-      if (localId != winner.id) {
+      // Check if leaderboard was already updated by winner
+      final bool leaderboardUpdated = payload['leaderboardUpdated'] == true;
+
+      // Calculate rating changes FIRST (needed for loser dialog)
+      int? localRatingChange;
+
+      // CRITICAL FIX: Skip duplicate leaderboard update if winner already handled it
+      // Only update from loser's side if winner didn't update (fallback)
+      if (!leaderboardUpdated && playersSnapshot.length == 2) {
         try {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('race.youLose'.tr() + ' — ' + 'race.winner'.tr(namedArgs: {'name': winner.displayName})),
-                duration: const Duration(seconds: 2),
-              ),
-            );
+          final player1 = playersSnapshot[0];
+          final player2 = playersSnapshot[1];
+          final winnerId = winner.id;
+          final loserId = (player1.id == winnerId) ? player2.id : player1.id;
+          final winnerName = (player1.id == winnerId) ? player1.displayName : player2.displayName;
+          final loserName = (player1.id == winnerId) ? player2.displayName : player1.displayName;
+
+          debugPrint('1v1 race detected! Updating ELO ratings from loser side (fallback)...');
+          debugPrint('Winner: $winnerName ($winnerId), Loser: $loserName ($loserId)');
+
+          final ratingChanges = await _leaderboardService.updateRatingsAfterRace(
+            winnerId: winnerId,
+            loserId: loserId,
+            winnerName: winnerName,
+            loserName: loserName,
+          );
+
+          // Store rating change for local player
+          if (localId == winnerId) {
+            localRatingChange = ratingChanges[0]; // Winner's change
+            if (mounted) {
+              setState(() {
+                _lastRatingChange = ratingChanges[0];
+              });
+            }
+          } else if (localId == loserId) {
+            localRatingChange = ratingChanges[1]; // Loser's change
+            if (mounted) {
+              setState(() {
+                _lastRatingChange = ratingChanges[1];
+              });
+            }
           }
-        } catch (_) {}
+
+          debugPrint('Rating changes: Winner ${ratingChanges[0] > 0 ? '+' : ''}${ratingChanges[0]}, Loser ${ratingChanges[1] > 0 ? '+' : ''}${ratingChanges[1]}');
+
+          // Log analytics event
+          AnalyticsService.instance.logEvent(
+            name: 'competitive_race_completed',
+            parameters: {
+              'winner_id': winnerId,
+              'loser_id': loserId,
+              'winner_rating_change': ratingChanges[0],
+              'loser_rating_change': ratingChanges[1],
+              'is_winner': (localId == winnerId),
+            },
+          );
+        } catch (e) {
+          debugPrint('Error updating ELO ratings from loser side: $e');
+        }
+      } else if (leaderboardUpdated) {
+        debugPrint('Leaderboard already updated by winner; skipping duplicate update');
+      }
+
+      // CRITICAL: If local player lost, show loser dialog with options
+      // This prevents false "You won!" dialog when loser finishes after winner left
+      debugPrint('=== LOSER CHECK: localId=$localId, winnerId=${winner.id}, winner.displayName=${winner.displayName}');
+      if (localId != winner.id) {
+        debugPrint('✓ Local player lost. Showing loser dialog...');
+        debugPrint('  Winner: ${winner.displayName} (${winner.id})');
+        debugPrint('  Rating change: $localRatingChange');
+
+        try {
+          debugPrint('  Calling _showYouLostDialog()...');
+          // Show loser dialog with winner info and rating change
+          final shouldContinue = await _showYouLostDialog(
+            winner: winner,
+            ratingChange: localRatingChange,
+          );
+          debugPrint('  Dialog returned: shouldContinue=$shouldContinue');
+
+          if (!shouldContinue) {
+            // User chose "Quit" - cleanup and leave immediately
+            debugPrint('User chose to quit after losing');
+            await _leaveCurrentRoom();
+
+            if (!mounted) return;
+            setState(() {
+              _inPublicRaceView = false;
+              _activeTrackIndex = null;
+              _raceStarted = false;
+              _quizSelectedIndices = [];
+              _quizCurrentPos = 0;
+              _quizScore = 0;
+              _currentDistance = 0.0;
+              _waitingForNextQuestion = false;
+              _roomCreatorId = null;
+              _alreadyLostRace = false; // Reset flag
+              _showingLostDialog = false; // Reset dialog flag
+            });
+
+            _handlingEndRace = false;
+            return;
+          }
+
+          // User chose "Finish Race" - set flag to prevent false win dialog
+          debugPrint('User chose to finish race after losing');
+          setState(() {
+            _alreadyLostRace = true;
+          });
+
+          _handlingEndRace = false;
+          return; // Exit without showing race result dialog
+        } catch (e) {
+          debugPrint('Error showing loser dialog: $e');
+        }
       }
 
       // Show the full results dialog (blocking until dismissed)
+      // This should only be reached if local player WON
       try {
         await _showRaceResultDialog(playersSnapshot, winner);
       } catch (e) {
         debugPrint('Error showing race result dialog: $e');
+      }
+
+      // Show rating change notification if applicable
+      if (_lastRatingChange != null && mounted) {
+        try {
+          final ratingChange = _lastRatingChange!;
+          final isPositive = ratingChange > 0;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Row(
+                children: [
+                  Icon(
+                    isPositive ? Icons.trending_up : Icons.trending_down,
+                    color: isPositive ? Colors.green : Colors.red,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Rating: ${ratingChange > 0 ? '+' : ''}$ratingChange',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+              backgroundColor: isPositive ? Colors.green.shade700 : Colors.red.shade700,
+              duration: const Duration(seconds: 3),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+          // Clear the rating change after showing
+          setState(() {
+            _lastRatingChange = null;
+          });
+        } catch (e) {
+          debugPrint('Error showing rating change notification: $e');
+        }
       }
 
       // best-effort ack to server
@@ -1175,7 +1670,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     try {
       _raceAborted = false;
       // ensure car data is loaded
-    if (carData.isEmpty) {
+      if (carData.isEmpty) {
       await _loadCarData();
       if (carData.isEmpty) {
         await showDialog(
@@ -1247,12 +1742,12 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       await _preparePath(W, H, _safeIndex(_activeTrackIndex));
     }
 
-      _stepDistance = (_totalPathLength > 0 ? _totalPathLength / _quizSelectedIndices.length : 0.0);
+    _stepDistance = (_totalPathLength > 0 ? _totalPathLength / _quizSelectedIndices.length : 0.0);
 
-      // reset animation controller to start of lap
-      _carController.stop();
-      _carController.reset();
-      _carController.value = 0.0;
+    // reset animation controller to start of lap
+    _carController.stop();
+    _carController.reset();
+    _carController.value = 0.0;
 
       // DON'T set _raceStarted = true here - it will be set after first question is shown
       // This prevents the "immediate win" bug
@@ -1296,10 +1791,14 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     _carController.reset();
     _currentRoomCode = roomCode;
     try {
-      // Create/join room (createRoom calls joinRoom internally)
-      await _collab.createRoom(roomCode, displayName: displayName);
+      // Create/join room based on isCreator flag
       if (isCreator) {
-        _roomCreatorId = _collab.localPlayerId; // Only set if creating the room
+        // Only create room if we're the creator
+        await _collab.createRoom(roomCode, displayName: displayName);
+        _roomCreatorId = _collab.localPlayerId;
+      } else {
+        // Just join existing room without calling createRoom
+        await _collab.joinRoom(roomCode, displayName: displayName);
       }
       // Initial presence touch
       unawaited(_collab.touchPresence(roomCode));
@@ -1307,26 +1806,64 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       await _collab.cleanupStalePlayers(roomCode, ttl: const Duration(seconds: 15));
       // Subscribe to players list
       _playersSub?.cancel();
-      _playersSub = _collab.playersStream(roomCode).listen((players) {
+      _messagesSub?.cancel();
+      _playersSub = _collab.playersStream(roomCode).listen((players) async {
         if (!mounted) return;
-        // PHASE 3 FIX: Optimize player merging from O(n²) to O(n) using Map lookup
+
+        // SIMPLE: Check if opponent finished all questions (their score = total) → we lost!
+        final localId = _collab.localPlayerId;
+        final opponent = players.firstWhere((p) => p.id != localId, orElse: () => PlayerInfo(
+          id: '', displayName: '', lastSeen: DateTime.now(),
+        ));
+        final totalQuestions = _quizSelectedIndices.length;
+
+        if (opponent.id.isNotEmpty &&
+            opponent.score >= totalQuestions &&
+            totalQuestions > 0 &&
+            !_alreadyLostRace &&
+            !_showingLostDialog &&
+            !_raceEndedByServer &&
+            _raceStarted) {
+          debugPrint('🚨 Opponent finished! ${opponent.displayName} scored ${opponent.score}/$totalQuestions');
+
+          // CRITICAL: Set flags IMMEDIATELY to prevent stream from triggering dialog again
+          _alreadyLostRace = true;
+          _showingLostDialog = true;
+
+          // Show dialog asynchronously without blocking the stream listener
+          Future.microtask(() async {
+            try {
+              final shouldContinue = await _showYouLostDialog(
+                winner: opponent,
+                ratingChange: null, // Will be calculated later if needed
+              );
+
+              _showingLostDialog = false; // Reset flag after dialog closes
+
+              if (!shouldContinue) {
+                await _leaveCurrentRoom();
+                if (mounted) setState(() { _inPublicRaceView = false; _activeTrackIndex = null; _raceStarted = false; });
+              }
+            } catch (e) {
+              debugPrint('❌ Error showing loser dialog: $e');
+              _showingLostDialog = false; // Reset flag on error
+            }
+          });
+        }
+
+        // Use Firestore scores directly (persistent state, not local cache)
+        // This ensures opponent scores are always up-to-date in real-time
         setState(() {
-          // Create lookup map for existing players - O(n)
-          final existing = {for (var p in _playersInRoom) p.id: p};
-          // Merge players using O(1) Map lookup instead of O(n) firstWhere - O(n) total
-          _playersInRoom = players.map((newPlayer) {
-            final existingPlayer = existing[newPlayer.id] ?? newPlayer;
-            return PlayerInfo(
-              id: newPlayer.id,
-              displayName: newPlayer.displayName,
-              lastSeen: newPlayer.lastSeen,
-              score: existingPlayer.score,
-              errors: existingPlayer.errors,
-            );
-          }).toList();
+          _playersInRoom = players;
         });
+
+        // Debug: Log player scores
+        for (final p in players) {
+          debugPrint('👤 Player: ${p.displayName} (${p.id}) - Score: ${p.score}, Errors: ${p.errors}');
+        }
       });
-      // Listen for score/error updates via messages
+      // Listen for race control messages (start_race, end_race)
+      // Score updates now handled via persistent player documents, not messages
       _messagesSub = _collab.messagesStream(_currentRoomCode!).listen((messages) async {
         // CRITICAL FIX: Prevent concurrent message processing
         if (_processingMessages) return;
@@ -1336,37 +1873,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
           for (final msg in messages) {
             if (!mounted) break;
 
-            if (msg.payload['type'] == 'score_update') {
-              setState(() {
-                _playersInRoom = _playersInRoom.map((p) {
-                  if (p.id == msg.payload['playerId']) {
-                    return PlayerInfo(
-                      id: p.id,
-                      displayName: p.displayName,
-                      lastSeen: p.lastSeen,
-                      score: msg.payload['score'],
-                      errors: p.errors,
-                    );
-                  }
-                  return p;
-                }).toList();
-              });
-            } else if (msg.payload['type'] == 'error_update') {
-            setState(() {
-              _playersInRoom = _playersInRoom.map((p) {
-                if (p.id == msg.payload['playerId']) {
-                  return PlayerInfo(
-                    id: p.id,
-                    displayName: p.displayName,
-                    lastSeen: p.lastSeen,
-                    score: p.score,
-                    errors: msg.payload['errors'],
-                  );
-                }
-                return p;
-              }).toList();
-            });
-          } else if (msg.payload['type'] == 'start_race') {
+            if (msg.payload['type'] == 'start_race') {
             // Skip own start_race message (room creator already starts locally via button)
             if (msg.senderId == _collab.localPlayerId) {
               debugPrint('Skipping own start_race message to prevent duplicate race start');
@@ -1374,14 +1881,56 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
             }
             // Start the race for all players when the message is received
             if (!_raceStarted) {
-              // CRITICAL: Validate session ID to prevent processing old messages from previous sessions
+              // Accept the host's session ID as authoritative for this race
               final String? messageSessionId = msg.payload['raceSessionId']?.toString();
-              if (messageSessionId == null || messageSessionId != _currentRaceSessionId) {
-                debugPrint('Ignoring start_race: session ID mismatch (message: $messageSessionId, current: $_currentRaceSessionId)');
-                continue;
+              if (messageSessionId != null) {
+                setState(() {
+                  _currentRaceSessionId = messageSessionId;
+                });
+                debugPrint('Synced session ID from host: $messageSessionId');
               }
-              debugPrint('Received start_race message (session: $_currentRaceSessionId), starting race!');
+              debugPrint('Received start_race message, starting race!');
               await _startQuizRace();
+            }
+          } else if (msg.payload['type'] == 'you_lost') {
+            // IMMEDIATE LOSER NOTIFICATION
+            debugPrint('📩 Received you_lost from ${msg.senderName}');
+
+            if (msg.senderId == _collab.localPlayerId) {
+              debugPrint('  ⏭️ Skipping own message');
+              continue;
+            }
+
+            final String? messageSessionId = msg.payload['raceSessionId']?.toString();
+            debugPrint('  🔍 Session: msg=$messageSessionId, current=$_currentRaceSessionId');
+            if (messageSessionId != _currentRaceSessionId) {
+              debugPrint('  ❌ MISMATCH! Ignoring');
+              continue;
+            }
+
+            debugPrint('  ✅ MATCH! Showing dialog...');
+            final winner = PlayerInfo(
+              id: msg.senderId,
+              displayName: msg.payload['winnerName']?.toString() ?? msg.senderName,
+              lastSeen: DateTime.now(),
+              score: msg.payload['winnerScore'] as int? ?? 0,
+              errors: 0,
+            );
+
+            try {
+              final shouldContinue = await _showYouLostDialog(
+                winner: winner,
+                ratingChange: msg.payload['ratingChange'] as int?,
+              );
+
+              if (!shouldContinue) {
+                await _leaveCurrentRoom();
+                if (mounted) setState(() { _inPublicRaceView = false; _activeTrackIndex = null; _raceStarted = false; });
+              } else {
+                if (mounted) setState(() { _alreadyLostRace = true; });
+              }
+            } catch (e) {
+              debugPrint('❌ Error in you_lost: $e');
             }
           } else if (msg.payload['type'] == 'end_race') {
             // Handle race end from server/other player
@@ -1638,7 +2187,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     final roomCode = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Enter Room Code'),
+        title: Text('race.enterRoomCodeTitle'.tr()),
         content: TextField(
           controller: roomCodeController,
           autofocus: true,
@@ -1656,13 +2205,27 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
           ),
           ElevatedButton(
             onPressed: () => Navigator.pop(context, roomCodeController.text.trim()),
-            child: Text('Continue'),
+            child: Text('common.continue'.tr()),
           ),
         ],
       ),
     );
 
     if (roomCode == null || roomCode.isEmpty) return;
+
+    // Validate room exists before proceeding
+    final exists = await _collab.roomExists(roomCode.toLowerCase());
+    if (!exists) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('race.roomNotFoundMessage'.tr(namedArgs: {'code': roomCode})),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      return;
+    }
 
     // Then show join dialog
     final profileName = await _fetchProfileUsername();
@@ -1688,7 +2251,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
 
           Future.delayed(const Duration(milliseconds: 250), () {
             if (!mounted) return;
-            _joinPrivateGame(index, playerName, roomCode, isCreator: false);
+            _joinPrivateGame(index, playerName, roomCode.toLowerCase(), isCreator: false);
           });
 
           return true;
@@ -1783,16 +2346,12 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         // CORRECT ANSWER: Increment score, advance position, move car
         _quizScore++;
 
-        // Notify server of score update
+        // Update score in player document (persistent, reliable)
         if (_currentRoomCode != null) {
           try {
-            await _collab.sendMessage(_currentRoomCode!, {
-              'type': 'score_update',
-              'playerId': localPlayerId,
-              'score': _quizScore,
-            });
+            await _collab.updatePlayerScore(_currentRoomCode!, _quizScore);
           } catch (e) {
-            debugPrint('Failed to send score_update: $e');
+            debugPrint('Failed to update player score: $e');
           }
         }
 
@@ -1913,7 +2472,6 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
     // Subscribe to public track presence streams so the track buttons update live.
     // We always subscribe so the UI reflects other players even if the user hasn't joined.
     _subscribePublicTracks();
-
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeShowTabIntro());
   }
 
@@ -1980,7 +2538,10 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                                 ],
                                 selectedValue: isPublicMode,
                                 onChanged: (bool value) {
-                                  setState(() => isPublicMode = value);
+                                  setState(() {
+                                    isPublicMode = value;
+                                    _showLeaderboard = false; // Reset to tracks view when switching modes
+                                  });
                                   if (value) {
                                     _subscribePublicTracks();
                                   } else {
@@ -1992,6 +2553,41 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                             ),
                           ),
                           const SizedBox(height: DesignTokens.space16),
+                          // Race/Leaderboard toggle (only in public mode)
+                          if (isPublicMode) ...[
+                            Center(
+                              child: ConstrainedBox(
+                                constraints: const BoxConstraints(maxWidth: 350),
+                                child: SegmentedControl<bool>(
+                                  options: [
+                                    SegmentOption(
+                                      value: false,
+                                      label: 'Race',
+                                      icon: Icons.directions_car,
+                                    ),
+                                    SegmentOption(
+                                      value: true,
+                                      label: 'Leaderboard',
+                                      icon: Icons.emoji_events,
+                                    ),
+                                  ],
+                                  selectedValue: _showLeaderboard,
+                                  onChanged: (bool value) {
+                                    setState(() => _showLeaderboard = value);
+                                    if (value) {
+                                      // Track analytics when viewing leaderboard
+                                      AnalyticsService.instance.logEvent(
+                                        name: 'leaderboard_viewed',
+                                        parameters: {'source': 'race_page'},
+                                      );
+                                    }
+                                  },
+                                  height: 44,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: DesignTokens.space16),
+                          ],
                           Divider(thickness: 0.5, color: DesignTokens.textTertiary.withOpacity(0.3)),
                         ],
                       ),
@@ -1999,14 +2595,15 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
             ),
           ),
 
-          // ===== Content zone (tracks grid + coming-soon promo OR race view) =====
+          // ===== Content zone (leaderboard, tracks grid, or race view) =====
           Expanded(
             child: AnimatedSwitcher(
               duration: const Duration(milliseconds: 250),
               child: _inPublicRaceView
                   ? _buildRaceView()
-                  // when NOT in race view, we show the tracks grid AND the promo below it
-                  : _buildTracksWithPromo(isPrivate: !isPublicMode),
+                  : (_showLeaderboard && isPublicMode)
+                      ? const LeaderboardWidget()
+                      : _buildTracksWithPromo(isPrivate: !isPublicMode),
             ),
           ),
         ],
@@ -2024,35 +2621,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       switchInCurve: Curves.easeOut,
       switchOutCurve: Curves.easeIn,
       child: isPublicMode
-          ? Column(
-              key: const ValueKey('leaderboard_promo_in_grid'),
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'race.leaderboardTitle'.tr(),
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.redAccent,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  'race.leaderboardDesc'.tr(),
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
-                ),
-                const SizedBox(height: 10),
-                SizedBox(
-                  height: 250,
-                  child: Image.asset(
-                    'assets/home/leaderboard_coming_soon.png',
-                    fit: BoxFit.contain,
-                  ),
-                ),
-              ],
-            )
+          ? const SizedBox.shrink() // Removed - leaderboard now has dedicated tab
           : Column(
               key: const ValueKey('clubs_promo_in_grid'),
               mainAxisSize: MainAxisSize.min,
@@ -2390,22 +2959,59 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       _playersSub?.cancel();
       _playersSub = _collab.playersStream(roomCode).listen((players) async {
         if (!mounted) return;
-        // PHASE 3 FIX: Optimize player merging from O(n²) to O(n) using Map lookup
+
+        // SIMPLE: Check if opponent finished all questions (their score = total) → we lost!
+        final localId = _collab.localPlayerId;
+        final opponent = players.firstWhere((p) => p.id != localId, orElse: () => PlayerInfo(
+          id: '', displayName: '', lastSeen: DateTime.now(),
+        ));
+        final totalQuestions = _quizSelectedIndices.length;
+
+        if (opponent.id.isNotEmpty &&
+            opponent.score >= totalQuestions &&
+            totalQuestions > 0 &&
+            !_alreadyLostRace &&
+            !_showingLostDialog &&
+            !_raceEndedByServer &&
+            _raceStarted) {
+          debugPrint('🚨 Opponent finished! ${opponent.displayName} scored ${opponent.score}/$totalQuestions');
+
+          // CRITICAL: Set flags IMMEDIATELY to prevent stream from triggering dialog again
+          _alreadyLostRace = true;
+          _showingLostDialog = true;
+
+          // Show dialog asynchronously without blocking the stream listener
+          Future.microtask(() async {
+            try {
+              final shouldContinue = await _showYouLostDialog(
+                winner: opponent,
+                ratingChange: null, // Will be calculated later if needed
+              );
+
+              _showingLostDialog = false; // Reset flag after dialog closes
+
+              if (!shouldContinue) {
+                await _leaveCurrentRoom();
+                if (mounted) setState(() { _inPublicRaceView = false; _activeTrackIndex = null; _raceStarted = false; });
+              }
+            } catch (e) {
+              debugPrint('❌ Error showing loser dialog: $e');
+              _showingLostDialog = false; // Reset flag on error
+            }
+          });
+        }
+
+        // Use Firestore scores directly (persistent state, not local cache)
+        // This ensures opponent scores are always up-to-date in real-time
         setState(() {
-          // Create lookup map for existing players - O(n)
-          final existing = {for (var p in _playersInRoom) p.id: p};
-          // Merge players using O(1) Map lookup instead of O(n) firstWhere - O(n) total
-          _playersInRoom = players.map((newPlayer) {
-            final existingPlayer = existing[newPlayer.id] ?? newPlayer;
-            return PlayerInfo(
-              id: newPlayer.id,
-              displayName: newPlayer.displayName,
-              lastSeen: newPlayer.lastSeen,
-              score: existingPlayer.score,
-              errors: existingPlayer.errors,
-            );
-          }).toList();
+          _playersInRoom = players;
         });
+
+        // Debug: Log player scores
+        for (final p in players) {
+          debugPrint('👤 Player: ${p.displayName} (${p.id}) - Score: ${p.score}, Errors: ${p.errors}');
+        }
+
         // Auto-start if 2+ players and not already started
         // CRITICAL FIX: Add await to prevent race condition
         if (!_raceStarted && players.length >= 2) {
@@ -2414,7 +3020,8 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         }
       });
 
-      // Listen for score/error updates via messages
+      // Listen for race control messages (start_race, end_race)
+      // Score updates now handled via persistent player documents, not messages
       _messagesSub = _collab.messagesStream(_currentRoomCode!).listen((messages) async {
         // CRITICAL FIX: Prevent concurrent message processing
         if (_processingMessages) return;
@@ -2424,69 +3031,80 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
           for (final msg in messages) {
             if (!mounted) break;
 
-            if (msg.payload['type'] == 'score_update') {
-              setState(() {
-                _playersInRoom = _playersInRoom.map((p) {
-                  if (p.id == msg.payload['playerId']) {
-                    return PlayerInfo(
-                      id: p.id,
-                      displayName: p.displayName,
-                      lastSeen: p.lastSeen,
-                      score: msg.payload['score'],
-                      errors: p.errors,
-                    );
-                  }
-                  return p;
-                }).toList();
-              });
-            } else if (msg.payload['type'] == 'error_update') {
-              setState(() {
-                _playersInRoom = _playersInRoom.map((p) {
-                  if (p.id == msg.payload['playerId']) {
-                    return PlayerInfo(
-                      id: p.id,
-                      displayName: p.displayName,
-                      lastSeen: p.lastSeen,
-                      score: p.score,
-                      errors: msg.payload['errors'],
-                    );
-                  }
-                  return p;
-                }).toList();
-              });
-            } else if (msg.payload['type'] == 'start_race') {
-              // Skip own start_race message (room creator already starts locally via button)
-              if (msg.senderId == _collab.localPlayerId) {
-                debugPrint('Skipping own start_race message to prevent duplicate race start');
-                continue;
+            if (msg.payload['type'] == 'start_race') {
+            // Skip own start_race message (room creator already starts locally via button)
+            if (msg.senderId == _collab.localPlayerId) {
+              debugPrint('Skipping own start_race message to prevent duplicate race start');
+              continue;
+            }
+            // Start the race for all players when the message is received
+            if (!_raceStarted) {
+              // Accept the host's session ID as authoritative for this race
+              final String? messageSessionId = msg.payload['raceSessionId']?.toString();
+              if (messageSessionId != null) {
+                setState(() {
+                  _currentRaceSessionId = messageSessionId;
+                });
+                debugPrint('Synced session ID from host: $messageSessionId');
               }
-              // Start the race for all players when the message is received
-              // CRITICAL FIX: Add await to prevent race condition
-              if (!_raceStarted) {
-                // CRITICAL: Validate session ID to prevent processing old messages from previous sessions
-                final String? messageSessionId = msg.payload['raceSessionId']?.toString();
-                if (messageSessionId == null || messageSessionId != _currentRaceSessionId) {
-                  debugPrint('Ignoring start_race: session ID mismatch (message: $messageSessionId, current: $_currentRaceSessionId)');
-                  continue;
-                }
-                debugPrint('Received start_race message, starting race!');
-                await _startQuizRace();
+              debugPrint('Received start_race message, starting race!');
+              await _startQuizRace();
+            }
+          } else if (msg.payload['type'] == 'you_lost') {
+            // IMMEDIATE LOSER NOTIFICATION
+            debugPrint('📩 Received you_lost from ${msg.senderName}');
+
+            if (msg.senderId == _collab.localPlayerId) {
+              debugPrint('  ⏭️ Skipping own message');
+              continue;
+            }
+
+            final String? messageSessionId = msg.payload['raceSessionId']?.toString();
+            debugPrint('  🔍 Session: msg=$messageSessionId, current=$_currentRaceSessionId');
+            if (messageSessionId != _currentRaceSessionId) {
+              debugPrint('  ❌ MISMATCH! Ignoring');
+              continue;
+            }
+
+            debugPrint('  ✅ MATCH! Showing dialog...');
+            final winner = PlayerInfo(
+              id: msg.senderId,
+              displayName: msg.payload['winnerName']?.toString() ?? msg.senderName,
+              lastSeen: DateTime.now(),
+              score: msg.payload['winnerScore'] as int? ?? 0,
+              errors: 0,
+            );
+
+            try {
+              final shouldContinue = await _showYouLostDialog(
+                winner: winner,
+                ratingChange: msg.payload['ratingChange'] as int?,
+              );
+
+              if (!shouldContinue) {
+                await _leaveCurrentRoom();
+                if (mounted) setState(() { _inPublicRaceView = false; _activeTrackIndex = null; _raceStarted = false; });
+              } else {
+                if (mounted) setState(() { _alreadyLostRace = true; });
               }
-            } else if (msg.payload['type'] == 'end_race') {
-              // Handle race end from server/other player
-              if (!_inPublicRaceView) {
-                debugPrint('Received end_race but not in public race view — ignoring.');
-                continue;
-              }
-              try {
-                final payloadCopy = Map<String, dynamic>.from(msg.payload);
-                _handleServerEndRace(payloadCopy);
-              } catch (e) {
-                debugPrint('Error handling server end_race: $e');
-              }
+            } catch (e) {
+              debugPrint('❌ Error in you_lost: $e');
+            }
+          } else if (msg.payload['type'] == 'end_race') {
+            // Handle race end from server/other player
+            if (!_inPublicRaceView) {
+              debugPrint('Received end_race but not in public race view — ignoring.');
+              continue;
+            }
+            try {
+              final payloadCopy = Map<String, dynamic>.from(msg.payload);
+              _handleServerEndRace(payloadCopy);
+            } catch (e) {
+              debugPrint('Error handling server end_race: $e');
             }
           }
-        } finally {
+        }
+      } finally {
           _processingMessages = false;
         }
       });
@@ -2531,18 +3149,9 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
       if (room != null) {
         // try to reset our score/errors on the room so when we come back there's no leftover value
         try {
-          final localId = _collab.localPlayerId;
-          // best-effort: send score update = 0 and errors = 0
-          await _collab.sendMessage(room, {
-            'type': 'score_update',
-            'playerId': localId,
-            'score': 0,
-          });
-          await _collab.sendMessage(room, {
-            'type': 'error_update',
-            'playerId': localId,
-            'errors': 0,
-          });
+          // best-effort: reset score and errors to 0 in player document
+          await _collab.updatePlayerScore(room, 0);
+          await _collab.updatePlayerErrors(room, 0);
         } catch (e) {
           debugPrint('Failed to reset local score on server for $room: $e');
           // continue to leave even if reset failed
@@ -2585,6 +3194,8 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
         _currentRaceSessionId = null;
         _processingMessages = false;
         _startingRace = false;
+        _alreadyLostRace = false; // Reset loser flag
+        _showingLostDialog = false; // Reset dialog flag
       });
     }
   }
@@ -2914,7 +3525,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                 if (_playersInRoom.isNotEmpty)
                   _buildPlayerStatLine(
                     player: _playersInRoom.firstWhere(
-                      (p) => p.displayName == _nameController.text.trim(),
+                      (p) => p.id == _collab.localPlayerId,
                       orElse: () => PlayerInfo(id: '', displayName: 'You', lastSeen: DateTime.now(), score: _quizScore, errors: 0),
                     ),
                     isLocal: true,
@@ -2923,7 +3534,7 @@ class _RacePageState extends State<RacePage> with SingleTickerProviderStateMixin
                 if (_playersInRoom.length >= 2)
                   _buildPlayerStatLine(
                     player: _playersInRoom.firstWhere(
-                      (p) => p.displayName != _nameController.text.trim(),
+                      (p) => p.id != _collab.localPlayerId,
                       orElse: () => PlayerInfo(id: '', displayName: 'Opponent', lastSeen: DateTime.now(), score: 0, errors: 0),
                     ),
                     isLocal: false,
@@ -3063,7 +3674,7 @@ class _RandomModelBrandQuestionContentState
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(12),
                 child: Image(
-                  image: _assetImageProvider('${widget.fileBase}$i.webp'),
+                  image: ImageCacheService.instance.imageProvider('${widget.fileBase}$i.webp'),
                   height: 200,
                   width: double.infinity,
                   fit: BoxFit.cover,
@@ -3325,7 +3936,7 @@ class _DescriptionSlideshowQuestionContentState
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(12),
                 child: Image(
-                  image: _assetImageProvider('${widget.fileBase}$i.webp'),
+                  image: ImageCacheService.instance.imageProvider('${widget.fileBase}$i.webp'),
                   height: 200,
                   width: double.infinity,
                   fit: BoxFit.cover,
@@ -3520,7 +4131,7 @@ class _HorsepowerQuestionContentState
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: _assetImageProvider('${widget.fileBase}$_frameIndex.webp'),
+                image: ImageCacheService.instance.imageProvider('${widget.fileBase}$_frameIndex.webp'),
                 height: 200,
                 width: double.infinity,
                 fit: BoxFit.cover,
@@ -3705,7 +4316,7 @@ class _AccelerationQuestionContentState
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: _assetImageProvider('${widget.fileBase}$_frameIndex.webp'),
+                image: ImageCacheService.instance.imageProvider('${widget.fileBase}$_frameIndex.webp'),
                 height: 200,
                 width: double.infinity,
                 fit: BoxFit.cover,
@@ -3936,7 +4547,7 @@ class _MaxSpeedQuestionContentState
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: _assetImageProvider('${widget.fileBase}$_frameIndex.webp'),
+                image: ImageCacheService.instance.imageProvider('${widget.fileBase}$_frameIndex.webp'),
                 height: 200,
                 width: double.infinity,
                 fit: BoxFit.cover,
@@ -4166,7 +4777,7 @@ class _SpecialFeatureQuestionContentState
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: _assetImageProvider('${widget.fileBase}$_frameIndex.webp'),
+                image: ImageCacheService.instance.imageProvider('${widget.fileBase}$_frameIndex.webp'),
                 height: 200,
                 width: double.infinity,
                 fit: BoxFit.cover,
@@ -4415,7 +5026,7 @@ class _DescriptionToCarImageQuestionContentState
                             FadeTransition(opacity: anim, child: child),
                         child: Image(
                           key: ValueKey<String>(assetName),
-                          image: _assetImageProvider(assetName),
+                          image: ImageCacheService.instance.imageProvider(assetName),
                           fit: BoxFit.cover,
                         ),
                       ),
@@ -4657,7 +5268,7 @@ class _BrandImageChoiceQuestionContentState
                           FadeTransition(opacity: anim, child: child),
                       child: Image(
                         key: ValueKey<String>(assetName),
-                        image: _assetImageProvider(assetName),
+                        image: ImageCacheService.instance.imageProvider(assetName),
                         fit: BoxFit.cover,
                       ),
                     ),
@@ -4847,7 +5458,7 @@ class _OriginCountryQuestionContentState
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: _assetImageProvider('${widget.fileBase}$_frameIndex.webp'),
+                image: ImageCacheService.instance.imageProvider('${widget.fileBase}$_frameIndex.webp'),
                 height: 220,
                 width: double.infinity,
                 fit: BoxFit.cover,
@@ -5026,7 +5637,7 @@ class _ModelOnlyImageQuestionContentState
                   FadeTransition(opacity: anim, child: child),
               child: Image(
                 key: ValueKey<int>(_frameIndex),
-                image: _assetImageProvider(
+                image: ImageCacheService.instance.imageProvider(
                   '${widget.fileBase}$_frameIndex.webp',
                 ),
                 height: 200,
@@ -5208,7 +5819,7 @@ class _RandomCarImageQuestionContentState
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(12),
                 child: Image(
-                  image: _assetImageProvider('${widget.fileBase}$i.webp'),
+                  image: ImageCacheService.instance.imageProvider('${widget.fileBase}$i.webp'),
                   height: 200,
                   width: double.infinity,
                   fit: BoxFit.cover,
@@ -5371,17 +5982,11 @@ class _RaceResultDialogContentState extends State<_RaceResultDialogContent>
       child: Container(
         constraints: const BoxConstraints(maxWidth: 400),
         decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: widget.localWon
-                ? [const Color(0xFF1a237e), const Color(0xFF0d47a1), const Color(0xFF01579b)]
-                : [const Color(0xFF263238), const Color(0xFF37474f), const Color(0xFF455a64)],
-          ),
-          borderRadius: BorderRadius.circular(20),
+          color: Colors.grey.shade900,
+          borderRadius: BorderRadius.circular(16),
           boxShadow: [
             BoxShadow(
-              color: widget.localWon ? Colors.blue.withOpacity(0.5) : Colors.black.withOpacity(0.5),
+              color: Colors.black.withOpacity(0.5),
               blurRadius: 20,
               spreadRadius: 5,
             ),
@@ -5393,16 +5998,6 @@ class _RaceResultDialogContentState extends State<_RaceResultDialogContent>
             // Header with trophy
             Container(
               padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: widget.localWon
-                      ? [Colors.amber.withOpacity(0.3), Colors.transparent]
-                      : [Colors.white.withOpacity(0.1), Colors.transparent],
-                ),
-                borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-              ),
               child: Column(
                 children: [
                   // Animated trophy
@@ -5602,23 +6197,22 @@ class _RaceResultDialogContentState extends State<_RaceResultDialogContent>
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
               child: SizedBox(
                 width: double.infinity,
-                height: 50,
+                height: 54,
                 child: ElevatedButton(
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: widget.localWon ? Colors.amber : Colors.white.withOpacity(0.2),
-                    foregroundColor: widget.localWon ? Colors.black : Colors.white,
+                    backgroundColor: Color(0xFFE74C3C),
+                    foregroundColor: Colors.white,
                     shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(25),
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    elevation: 5,
+                    elevation: 0,
                   ),
                   onPressed: () => Navigator.of(context).pop(),
                   child: Text(
-                    'Continue',
+                    'common.continue'.tr(),
                     style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 1.0,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w500,
                     ),
                   ),
                 ),
